@@ -1,0 +1,5 @@
+excellent wine selection####(wine selection, food quality, positive, excellent)
+the fries were soggy####(fries, food quality, negative, soggy)
+friendly staff but expensive menu####(staff, service general, positive, friendly);(menu, food prices, negative, expensive)
+perfect for a date night####(NULL, ambience general, positive, perfect)
+average food nothing remarkable####(food, food quality, neutral, average)

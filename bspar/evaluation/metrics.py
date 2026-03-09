@@ -115,3 +115,65 @@ def category_accuracy(predictions, golds):
 
     accuracy = correct / total if total > 0 else 0.0
     return {"accuracy": accuracy, "correct": correct, "total": total}
+
+
+def compute_quad_f1(pred_cand_lists, gold_quad_lists, id_to_cat, cat_to_id):
+    """Compute Quad-F1 from candidate dicts and gold Quad objects.
+
+    This bridges the gap between Stage-1 candidate dict output and
+    the Quad-based metrics above.
+
+    Args:
+        pred_cand_lists: list[list[dict]] — candidate dicts per example
+        gold_quad_lists: list[list[Quad]] — gold quads per example
+        id_to_cat: dict — category id → name
+        cat_to_id: dict — category name → id
+
+    Returns:
+        dict with quad_f1, span_f1, and other metrics
+    """
+    from ..data.schema import Span, Quad
+    from ..data.preprocessor import ID_TO_SENTIMENT
+
+    all_pred_quads = []
+    all_gold_quads = []
+
+    for preds, golds in zip(pred_cand_lists, gold_quad_lists):
+        pred_quads = []
+        for c in preds:
+            a_span = c["asp_span"]
+            o_span = c["opn_span"]
+
+            if a_span == (-1, -1):
+                aspect = Span.null("aspect")
+            else:
+                aspect = Span(start=a_span[0], end=a_span[1], text="")
+
+            if o_span == (-1, -1):
+                opinion = Span.null("opinion")
+            else:
+                opinion = Span(start=o_span[0], end=o_span[1], text="")
+
+            category = id_to_cat.get(c["category_id"], "")
+            sentiment = ID_TO_SENTIMENT.get(c["affective"], "NEU")
+
+            pred_quads.append(Quad(
+                aspect=aspect, opinion=opinion,
+                category=category, sentiment=sentiment,
+            ))
+
+        all_pred_quads.append(pred_quads)
+        all_gold_quads.append(golds)
+
+    qf1 = quad_f1(all_pred_quads, all_gold_quads)
+    sf1_asp = span_f1(all_pred_quads, all_gold_quads, role="aspect")
+    sf1_opn = span_f1(all_pred_quads, all_gold_quads, role="opinion")
+
+    return {
+        "quad_f1": qf1["f1"],
+        "quad_precision": qf1["precision"],
+        "quad_recall": qf1["recall"],
+        "span_f1": (sf1_asp["f1"] + sf1_opn["f1"]) / 2,
+        "asp_f1": sf1_asp["f1"],
+        "opn_f1": sf1_opn["f1"],
+    }
