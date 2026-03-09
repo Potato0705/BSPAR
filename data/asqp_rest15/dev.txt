@@ -1,0 +1,5 @@
+the chicken was dry####(chicken, food quality, negative, dry)
+lovely ambiance and tasty food####(ambiance, ambience general, positive, lovely);(food, food quality, positive, tasty)
+slow service on weekends####(service, service general, negative, slow)
+the salad was fresh and crispy####(salad, food quality, positive, fresh);(salad, food quality, positive, crispy)
+affordable and filling meals####(meals, food prices, positive, affordable);(meals, food quality, positive, filling)
