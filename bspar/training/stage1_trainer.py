@@ -210,7 +210,7 @@ class Stage1Trainer:
         selected = []
         seen = set()
         for score, c in scored:
-            if score < 0.05:  # threshold
+            if c["pair_score"] < 0.5:  # threshold on pair_score only
                 break
             key = (c["asp_span"], c["opn_span"], c["category_id"])
             if key in seen:
