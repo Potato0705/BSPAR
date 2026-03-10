@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bspar.config import BSPARConfig
 from bspar.data.preprocessor import (
-    load_asqp_file, ASQP_CATEGORIES, build_category_map
+    load_data, build_category_map, get_categories_for_dataset
 )
 from bspar.data.dataset import BSPARStage1Dataset, collate_stage1
 from bspar.models.bspar_stage1 import BSPARStage1
@@ -38,20 +38,23 @@ def main():
 
     set_seed(42)
 
-    cat_to_id, id_to_cat = build_category_map(ASQP_CATEGORIES)
-    config.num_categories = len(ASQP_CATEGORIES)
+    dataset_name = cfg_dict.get("dataset_name", "asqp_rest15")
+    data_format = cfg_dict.get("data_format", "auto")
+    categories = get_categories_for_dataset(dataset_name)
+    cat_to_id, id_to_cat = build_category_map(categories)
+    config.num_categories = len(categories)
 
     data_dir = cfg_dict.get("data_dir", "data/asqp_rest15")
     train_file = os.path.join(data_dir, cfg_dict.get("train_file", "train.txt"))
     dev_file = os.path.join(data_dir, cfg_dict.get("dev_file", "dev.txt"))
 
-    train_examples = load_asqp_file(train_file, ASQP_CATEGORIES)
-    dev_examples = load_asqp_file(dev_file, ASQP_CATEGORIES)
+    train_examples = load_data(train_file, data_format, categories)
+    dev_examples = load_data(dev_file, data_format, categories)
 
     # Load model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = BSPARStage1(config)
-    ckpt = torch.load(args.checkpoint, map_location=device)
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
     model.eval()

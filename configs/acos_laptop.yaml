@@ -1,7 +1,6 @@
-# BSPAR config for ASQP-Rest15
+# BSPAR config for ACOS-Laptop
 task_type: asqp
-dataset_name: asqp_rest15
-num_categories: 12
+dataset_name: acos_laptop
 num_sentiments: 3
 
 # Encoder
@@ -49,14 +48,14 @@ max_grad_norm: 1.0
 patience: 5
 
 # Data
-data_dir: data/asqp_rest15
-train_file: train.txt
-dev_file: dev.txt
-test_file: test.txt
-data_format: auto
+data_dir: data/acos_laptop
+train_file: train.tsv
+dev_file: dev.tsv
+test_file: test.tsv
+data_format: acos
 
 # Output
-output_dir: outputs/asqp_rest15
+output_dir: outputs/acos_laptop
 
 # Seeds
 seeds:

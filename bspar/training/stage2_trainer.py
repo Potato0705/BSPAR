@@ -207,7 +207,7 @@ class Stage2Trainer:
                 aff_input=batch["aff_input"],
                 meta_features=batch["meta_features"],
                 labels=batch["labels"],
-                mode="train",
+                mode="train",  # need labels for loss computation
             )
 
             total_loss += result["loss"].item()

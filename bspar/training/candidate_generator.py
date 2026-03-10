@@ -101,10 +101,17 @@ class CandidateGenerator:
         return all_rerank
 
     def _extract_batch_candidates(self, outputs, batch_idx):
-        """Extract candidate quads for a single example from batch output."""
-        # Implementation depends on _build_candidates output format
-        # Placeholder: to be filled based on Stage-1 output structure
-        return []
+        """Extract candidate quads for a single example from batch output.
+
+        The Stage-1 model's _build_candidates() returns:
+            outputs["candidates"]: list[list[dict]] — candidates per example
+        Each candidate dict has keys: pair_repr, pair_score, asp_span, opn_span,
+            category_id, affective, meta_features, etc.
+        """
+        candidates = outputs.get("candidates", [])
+        if batch_idx >= len(candidates):
+            return []
+        return candidates[batch_idx]
 
     def _match_gold(self, candidate, gold_quads):
         """Exact match: aspect span + opinion span + category + sentiment."""

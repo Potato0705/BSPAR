@@ -9,7 +9,8 @@ class BSPARConfig:
 
     # === Task ===
     task_type: str = "asqp"             # "asqp" or "dimabsa"
-    num_categories: int = 13            # dataset-dependent
+    dataset_name: str = "asqp_rest15"   # asqp_rest15/rest16, acos_laptop/restaurant
+    num_categories: int = 12            # dataset-dependent, auto-set from dataset
     num_sentiments: int = 3             # POS, NEG, NEU (ASQP only)
 
     # === Encoder ===
