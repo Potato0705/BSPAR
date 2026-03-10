@@ -4,7 +4,7 @@ dataset_name: acos_laptop
 num_sentiments: 3
 
 # Encoder
-model_name: roberta-base
+model_name: xlm-roberta-base
 finetune_encoder: true
 
 # Span Proposal

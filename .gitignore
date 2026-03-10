@@ -31,3 +31,7 @@ Thumbs.db
 
 # HuggingFace cache
 .cache/
+
+# Local pretrained models
+xlm-roberta-base/
+roberta-base/
