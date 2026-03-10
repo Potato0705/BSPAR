@@ -49,9 +49,10 @@ class SharedEncoder(nn.Module):
         Returns:
             H: (batch, seq_len, hidden_size)
         """
-        outputs = self.transformer(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-        )
+        kwargs = dict(input_ids=input_ids, attention_mask=attention_mask)
+        # Only pass token_type_ids if the model supports it
+        # (XLM-RoBERTa does NOT use token_type_ids)
+        if token_type_ids is not None and hasattr(self.transformer.config, 'type_vocab_size') and self.transformer.config.type_vocab_size > 1:
+            kwargs["token_type_ids"] = token_type_ids
+        outputs = self.transformer(**kwargs)
         return outputs.last_hidden_state
