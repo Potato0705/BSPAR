@@ -76,7 +76,9 @@ class BSPARStage1(nn.Module):
                 gold_quads, cat_to_id, word_to_subword
             )
         else:
-            return self._build_candidates(proposal_out, pair_out, pruned, pair_map)
+            return self._build_candidates(
+                proposal_out, pair_out, pruned, pair_map, word_to_subword
+            )
 
     def _prune_spans(self, proposal_out):
         """Keep top-K aspects and top-K opinions by unary score, plus NULLs."""
@@ -184,12 +186,60 @@ class BSPARStage1(nn.Module):
             "order_ids": order_ids,
         }, pair_map
 
+    @staticmethod
+    def _word_span_to_subword(word_start, word_end, w2s):
+        """Convert word-level span to subword-level span using alignment.
+
+        Args:
+            word_start: word-level start index (inclusive)
+            word_end: word-level end index (inclusive)
+            w2s: list of (sub_start, sub_end) per word
+
+        Returns:
+            (sub_start, sub_end) inclusive, or None if out of range.
+        """
+        if word_start < 0 or word_end < 0:
+            return (-1, -1)
+        if word_start >= len(w2s) or word_end >= len(w2s):
+            return None
+        sub_start = w2s[word_start][0]
+        sub_end = w2s[word_end][1]
+        return (sub_start, sub_end)
+
+    @staticmethod
+    def _subword_span_to_word(sub_start, sub_end, w2s):
+        """Convert subword-level span back to word-level span.
+
+        Args:
+            sub_start: subword start index (inclusive)
+            sub_end: subword end index (inclusive)
+            w2s: list of (sub_start, sub_end) per word
+
+        Returns:
+            (word_start, word_end) inclusive, or (-1, -1) for NULL.
+        """
+        if sub_start < 0 or sub_end < 0:
+            return (-1, -1)
+        word_start = None
+        word_end = None
+        for w_idx, (ws, we) in enumerate(w2s):
+            if ws <= sub_start <= we:
+                word_start = w_idx
+            if ws <= sub_end <= we:
+                word_end = w_idx
+        if word_start is not None and word_end is not None:
+            return (word_start, word_end)
+        return (-1, -1)
+
     def _compute_stage1_losses(self, proposal_out, pair_out, pruned, pair_map,
                                 gold_quads, cat_to_id, word_to_subword):
         """Compute L_span + L_pair + L_cat + L_aff with full label assignment."""
         device = proposal_out["asp_scores"].device
         batch_size = proposal_out["asp_scores"].size(0)
         span_indices = proposal_out["span_indices"]
+
+        # Build lookup set for fast span matching
+        span_index_map = {span: idx for idx, span in enumerate(span_indices)}
 
         # =====================================================================
         # L_span: Assign binary labels to all enumerated spans
@@ -201,18 +251,21 @@ class BSPARStage1(nn.Module):
         for b in range(batch_size):
             if gold_quads is None or gold_quads[b] is None:
                 continue
+            w2s = word_to_subword[b] if word_to_subword else None
             for q in gold_quads[b]:
-                if not q.aspect.is_null:
-                    # Find this span in enumerated spans
-                    target = (q.aspect.start, q.aspect.end)
-                    if target in span_indices:
-                        idx = span_indices.index(target)
-                        asp_labels[b, idx] = 1.0
-                if not q.opinion.is_null:
-                    target = (q.opinion.start, q.opinion.end)
-                    if target in span_indices:
-                        idx = span_indices.index(target)
-                        opn_labels[b, idx] = 1.0
+                if not q.aspect.is_null and w2s is not None:
+                    # Convert word-level span to subword-level
+                    target = self._word_span_to_subword(
+                        q.aspect.start, q.aspect.end, w2s
+                    )
+                    if target is not None and target in span_index_map:
+                        asp_labels[b, span_index_map[target]] = 1.0
+                if not q.opinion.is_null and w2s is not None:
+                    target = self._word_span_to_subword(
+                        q.opinion.start, q.opinion.end, w2s
+                    )
+                    if target is not None and target in span_index_map:
+                        opn_labels[b, span_index_map[target]] = 1.0
 
         # Focal BCE for span loss
         loss_span = (
@@ -237,21 +290,50 @@ class BSPARStage1(nn.Module):
 
             asp_indices = pruned["asp_indices"][b]
             opn_indices = pruned["opn_indices"][b]
+            w2s = word_to_subword[b] if word_to_subword else None
 
-            # Build gold pair set
+            # Build gold pair set (converted to subword-level)
             gold_pairs = {}
             for q in gold_quads[b]:
-                a_span = (q.aspect.start, q.aspect.end) if not q.aspect.is_null else (-1, -1)
-                o_span = (q.opinion.start, q.opinion.end) if not q.opinion.is_null else (-1, -1)
+                if not q.aspect.is_null and w2s is not None:
+                    a_span = self._word_span_to_subword(
+                        q.aspect.start, q.aspect.end, w2s
+                    )
+                    if a_span is None:
+                        continue
+                elif q.aspect.is_null:
+                    a_span = (-1, -1)
+                else:
+                    continue
+
+                if not q.opinion.is_null and w2s is not None:
+                    o_span = self._word_span_to_subword(
+                        q.opinion.start, q.opinion.end, w2s
+                    )
+                    if o_span is None:
+                        continue
+                elif q.opinion.is_null:
+                    o_span = (-1, -1)
+                else:
+                    continue
+
                 gold_pairs[(a_span, o_span)] = q
 
             gold_asp_spans = set()
             gold_opn_spans = set()
             for q in gold_quads[b]:
-                if not q.aspect.is_null:
-                    gold_asp_spans.add((q.aspect.start, q.aspect.end))
-                if not q.opinion.is_null:
-                    gold_opn_spans.add((q.opinion.start, q.opinion.end))
+                if not q.aspect.is_null and w2s is not None:
+                    sub = self._word_span_to_subword(
+                        q.aspect.start, q.aspect.end, w2s
+                    )
+                    if sub is not None:
+                        gold_asp_spans.add(sub)
+                if not q.opinion.is_null and w2s is not None:
+                    sub = self._word_span_to_subword(
+                        q.opinion.start, q.opinion.end, w2s
+                    )
+                    if sub is not None:
+                        gold_opn_spans.add(sub)
 
             for p, (ai, oi) in enumerate(pair_map):
                 a_span = asp_indices[ai]
@@ -327,7 +409,8 @@ class BSPARStage1(nn.Module):
         focal_weight = alpha_t * (1 - p_t) ** self.focal_gamma
         return (focal_weight * ce).mean()
 
-    def _build_candidates(self, proposal_out, pair_out, pruned, pair_map):
+    def _build_candidates(self, proposal_out, pair_out, pruned, pair_map,
+                          word_to_subword=None):
         """Build candidate quads for Stage-2 reranking."""
         batch_size = pair_out["pair_scores"].size(0)
         candidates_per_example = []
@@ -335,6 +418,7 @@ class BSPARStage1(nn.Module):
         for b in range(batch_size):
             asp_indices = pruned["asp_indices"][b]
             opn_indices = pruned["opn_indices"][b]
+            w2s = word_to_subword[b] if word_to_subword else None
 
             cat_probs = torch.softmax(pair_out["cat_logits"][b], dim=-1)
             aff_preds = torch.argmax(pair_out["aff_output"][b], dim=-1)
@@ -346,8 +430,20 @@ class BSPARStage1(nn.Module):
                 if pair_score < 0.01:
                     continue
 
-                a_span = asp_indices[ai]
-                o_span = opn_indices[oi]
+                a_span_sub = asp_indices[ai]
+                o_span_sub = opn_indices[oi]
+
+                # Convert subword spans back to word-level for evaluation
+                if w2s is not None:
+                    a_span = self._subword_span_to_word(
+                        a_span_sub[0], a_span_sub[1], w2s
+                    ) if a_span_sub != (-1, -1) else (-1, -1)
+                    o_span = self._subword_span_to_word(
+                        o_span_sub[0], o_span_sub[1], w2s
+                    ) if o_span_sub != (-1, -1) else (-1, -1)
+                else:
+                    a_span = a_span_sub
+                    o_span = o_span_sub
 
                 # Top-c categories
                 topk_probs, topk_cats = torch.topk(

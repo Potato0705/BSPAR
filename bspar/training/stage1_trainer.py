@@ -177,6 +177,7 @@ class Stage1Trainer:
             outputs = self.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                word_to_subword=batch["word_to_subword"],
                 mode="inference",
             )
 
