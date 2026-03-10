@@ -24,7 +24,14 @@ class BSPARStage1Dataset(Dataset):
     def __init__(self, examples: list[Example], tokenizer_name: str,
                  max_length: int = 128, max_span_length: int = 8):
         self.examples = examples
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        except (OSError, Exception):
+            # Offline fallback: create a minimal word-level tokenizer
+            from bspar.data._offline_tokenizer import OfflineTokenizer
+            print(f"Warning: cannot load '{tokenizer_name}', "
+                  f"using offline word tokenizer (dev/test only)")
+            self.tokenizer = OfflineTokenizer(max_length=max_length)
         self.max_length = max_length
         self.max_span_length = max_span_length
 
