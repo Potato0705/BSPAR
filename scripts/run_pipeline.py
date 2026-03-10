@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bspar.config import BSPARConfig
 from bspar.data.preprocessor import (
-    load_asqp_file, ASQP_CATEGORIES, build_category_map
+    load_data, build_category_map, get_categories_for_dataset
 )
 from bspar.data.dataset import BSPARStage1Dataset, collate_stage1
 from bspar.training.stage1_trainer import Stage1Trainer
@@ -44,19 +44,23 @@ def main():
     set_seed(args.seed)
     output_dir = cfg_dict.get("output_dir", "outputs")
     data_dir = cfg_dict.get("data_dir", "data/asqp_rest15")
+    dataset_name = cfg_dict.get("dataset_name", "asqp_rest15")
+    data_format = cfg_dict.get("data_format", "auto")
 
-    cat_to_id, id_to_cat = build_category_map(ASQP_CATEGORIES)
-    config.num_categories = len(ASQP_CATEGORIES)
+    categories = get_categories_for_dataset(dataset_name)
+    cat_to_id, id_to_cat = build_category_map(categories)
+    config.num_categories = len(categories)
 
     # Load data
     train_file = os.path.join(data_dir, cfg_dict.get("train_file", "train.txt"))
     dev_file = os.path.join(data_dir, cfg_dict.get("dev_file", "dev.txt"))
-    train_examples = load_asqp_file(train_file, ASQP_CATEGORIES)
-    dev_examples = load_asqp_file(dev_file, ASQP_CATEGORIES)
+    train_examples = load_data(train_file, data_format, categories)
+    dev_examples = load_data(dev_file, data_format, categories)
 
     print(f"=== BSPAR Full Pipeline ===")
+    print(f"Dataset: {dataset_name}")
     print(f"Train: {len(train_examples)} | Dev: {len(dev_examples)}")
-    print(f"Categories: {len(ASQP_CATEGORIES)}")
+    print(f"Categories: {len(categories)}")
 
     # =========================================================================
     # Phase A: Stage-1 Training

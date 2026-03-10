@@ -9,13 +9,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bspar.config import BSPARConfig
 from bspar.data.preprocessor import (
-    load_asqp_file, ASQP_CATEGORIES, build_category_map
+    load_data, build_category_map, get_categories_for_dataset
 )
 from bspar.training.stage1_trainer import Stage1Trainer
 from bspar.utils.seed import set_seed
 
 
-def load_config(config_path: str) -> BSPARConfig:
+def load_config(config_path: str) -> tuple[BSPARConfig, dict]:
     """Load config from YAML and create BSPARConfig."""
     with open(config_path, "r") as f:
         cfg_dict = yaml.safe_load(f)
@@ -42,36 +42,32 @@ def main():
     # Overrides
     data_dir = args.data_dir or cfg_dict.get("data_dir", "data/asqp_rest15")
     output_dir = args.output_dir or cfg_dict.get("output_dir", "outputs/stage1")
+    dataset_name = cfg_dict.get("dataset_name", "asqp_rest15")
+    data_format = cfg_dict.get("data_format", "auto")
 
     # Seed
     set_seed(args.seed)
     print(f"BSPAR Stage-1 Training | Seed: {args.seed}")
     print(f"Config: {args.config}")
-    print(f"Data: {data_dir}")
+    print(f"Dataset: {dataset_name} | Data: {data_dir}")
     print(f"Output: {output_dir}")
     print(f"Model: {config.model_name}")
 
     # Category mapping
-    cat_to_id, id_to_cat = build_category_map(ASQP_CATEGORIES)
-    config.num_categories = len(ASQP_CATEGORIES)
+    categories = get_categories_for_dataset(dataset_name)
+    cat_to_id, id_to_cat = build_category_map(categories)
+    config.num_categories = len(categories)
 
     # Load data
-    data_format = cfg_dict.get("data_format", "asqp_txt")
     train_file = os.path.join(data_dir, cfg_dict.get("train_file", "train.txt"))
     dev_file = os.path.join(data_dir, cfg_dict.get("dev_file", "dev.txt"))
 
-    if data_format == "asqp_txt":
-        train_examples = load_asqp_file(train_file, ASQP_CATEGORIES)
-        dev_examples = load_asqp_file(dev_file, ASQP_CATEGORIES)
-    elif data_format == "jsonl":
-        from bspar.data.preprocessor import load_jsonl_file
-        train_examples = load_jsonl_file(train_file)
-        dev_examples = load_jsonl_file(dev_file)
-    else:
-        raise ValueError(f"Unknown data format: {data_format}")
+    train_examples = load_data(train_file, data_format, categories)
+    dev_examples = load_data(dev_file, data_format, categories)
 
     print(f"Train: {len(train_examples)} examples")
     print(f"Dev: {len(dev_examples)} examples")
+    print(f"Categories: {len(categories)}")
 
     # Train
     trainer = Stage1Trainer(

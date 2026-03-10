@@ -1,6 +1,6 @@
-# BSPAR config for ASQP-Rest15
+# BSPAR config for ASQP-Rest16
 task_type: asqp
-dataset_name: asqp_rest15
+dataset_name: asqp_rest16
 num_categories: 12
 num_sentiments: 3
 
@@ -49,14 +49,14 @@ max_grad_norm: 1.0
 patience: 5
 
 # Data
-data_dir: data/asqp_rest15
+data_dir: data/asqp_rest16
 train_file: train.txt
 dev_file: dev.txt
 test_file: test.txt
 data_format: auto
 
 # Output
-output_dir: outputs/asqp_rest15
+output_dir: outputs/asqp_rest16
 
 # Seeds
 seeds:
