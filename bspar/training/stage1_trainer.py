@@ -191,11 +191,15 @@ class Stage1Trainer:
         return compute_quad_f1(all_preds, all_golds, self.id_to_cat,
                                self.cat_to_id)
 
-    def _greedy_decode(self, candidates):
+    def _greedy_decode(self, candidates, pair_threshold=0.1):
         """Simple greedy decoding from candidates.
 
         Sort by pair_score × cat_prob, take top predictions,
         apply simple dedup.
+
+        Args:
+            candidates: list of candidate dicts from _build_candidates
+            pair_threshold: minimum pair_score to accept (default 0.1)
         """
         if not candidates:
             return []
@@ -211,7 +215,7 @@ class Stage1Trainer:
         selected = []
         seen = set()
         for score, c in scored:
-            if c["pair_score"] < 0.5:  # threshold on pair_score only
+            if c["pair_score"] < pair_threshold:
                 break
             key = (c["asp_span"], c["opn_span"], c["category_id"])
             if key in seen:
