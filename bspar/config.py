@@ -63,6 +63,7 @@ class BSPARConfig:
 
     # === Decode ===
     quad_score_threshold: float = 0.0
+    stage1_pair_score_threshold: float = 0.01
     nms_overlap_suppress: bool = True
 
     # === Reproducibility ===
