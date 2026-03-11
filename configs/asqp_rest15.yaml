@@ -35,6 +35,9 @@ focal_gamma: 2.0
 hard_neg_weight: 3.0
 ranking_margin: 1.0
 
+# Decode
+stage1_pair_score_threshold: 0.01
+
 # Training
 encoder_lr: 2.0e-5
 head_lr: 1.0e-4

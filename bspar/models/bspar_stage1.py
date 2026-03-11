@@ -61,14 +61,13 @@ class BSPARStage1(nn.Module):
         # Step 2: Span proposal
         proposal_out = self.span_proposal(H, attention_mask)
 
-        # Step 3: Prune spans (inject gold spans during training)
-        if mode == "train" and gold_quads is not None:
-            pruned = self._prune_spans(
-                proposal_out, gold_quads=gold_quads,
-                word_to_subword=word_to_subword,
-            )
-        else:
-            pruned = self._prune_spans(proposal_out)
+        # Step 3: Prune spans (train mode can force-include gold spans)
+        pruned = self._prune_spans(
+            proposal_out,
+            gold_quads=gold_quads,
+            word_to_subword=word_to_subword,
+            mode=mode,
+        )
 
         # Step 4: Construct pair candidates
         pair_inputs, pair_map = self._construct_pairs(pruned)
@@ -86,13 +85,48 @@ class BSPARStage1(nn.Module):
                 proposal_out, pair_out, pruned, pair_map, word_to_subword
             )
 
-    def _prune_spans(self, proposal_out, gold_quads=None,
-                     word_to_subword=None):
-        """Keep top-K aspects and top-K opinions by unary score, plus NULLs.
+    @staticmethod
+    def _force_include_ids(selected_ids, required_ids):
+        """Force-include required span ids into a fixed-size selected id list.
 
-        During training, gold spans are injected into top-K to ensure
-        pair/cat/aff heads receive positive supervision (teacher forcing).
+        Keeps list length unchanged by replacing low-priority selected ids.
         """
+        selected = list(selected_ids)
+        required = []
+        seen = set()
+        for rid in required_ids:
+            if rid not in seen:
+                required.append(rid)
+                seen.add(rid)
+
+        if not required:
+            return selected
+
+        selected_set = set(selected)
+        required_set = set(required)
+        replace_ptr = len(selected) - 1
+
+        for rid in required:
+            if rid in selected_set:
+                continue
+
+            while replace_ptr >= 0 and selected[replace_ptr] in required_set:
+                replace_ptr -= 1
+
+            if replace_ptr < 0:
+                break
+
+            old = selected[replace_ptr]
+            selected_set.discard(old)
+            selected[replace_ptr] = rid
+            selected_set.add(rid)
+            replace_ptr -= 1
+
+        return selected
+
+    def _prune_spans(self, proposal_out, gold_quads=None,
+                     word_to_subword=None, mode="train"):
+        """Keep top-K spans, and in train mode force-include gold spans."""
         asp_scores = proposal_out["asp_scores"]
         opn_scores = proposal_out["opn_scores"]
         span_reprs = proposal_out["span_reprs"]
@@ -102,57 +136,47 @@ class BSPARStage1(nn.Module):
         K_a = min(self.config.top_k_aspects, asp_scores.size(1))
         K_o = min(self.config.top_k_opinions, opn_scores.size(1))
 
-        # Build span_index_map for gold injection
-        span_index_map = None
-        if gold_quads is not None:
+        asp_topk_ids = torch.topk(asp_scores, K_a, dim=1).indices
+        opn_topk_ids = torch.topk(opn_scores, K_o, dim=1).indices
+
+        # Teacher-forcing on spans: preserve top-K size while injecting gold spans.
+        if mode == "train" and gold_quads is not None and word_to_subword is not None:
             span_index_map = {span: idx for idx, span in enumerate(span_indices)}
 
-        asp_topk_scores, asp_topk_ids = torch.topk(asp_scores, K_a, dim=1)
-        opn_topk_scores, opn_topk_ids = torch.topk(opn_scores, K_o, dim=1)
-
-        # Gold span injection: replace tail of top-K with gold spans if missing
-        if gold_quads is not None and span_index_map is not None:
             for b in range(batch_size):
-                w2s = word_to_subword[b] if word_to_subword else None
-                if w2s is None or gold_quads[b] is None:
-                    continue
+                w2s = word_to_subword[b]
+                required_asp = []
+                required_opn = []
 
-                # Collect gold aspect/opinion span indices
-                gold_asp_span_ids = []
-                gold_opn_span_ids = []
                 for q in gold_quads[b]:
                     if not q.aspect.is_null:
-                        target = self._word_span_to_subword(
+                        a_sub = self._word_span_to_subword(
                             q.aspect.start, q.aspect.end, w2s
                         )
-                        if target is not None and target in span_index_map:
-                            gold_asp_span_ids.append(span_index_map[target])
+                        if a_sub is not None and a_sub in span_index_map:
+                            required_asp.append(span_index_map[a_sub])
+
                     if not q.opinion.is_null:
-                        target = self._word_span_to_subword(
+                        o_sub = self._word_span_to_subword(
                             q.opinion.start, q.opinion.end, w2s
                         )
-                        if target is not None and target in span_index_map:
-                            gold_opn_span_ids.append(span_index_map[target])
+                        if o_sub is not None and o_sub in span_index_map:
+                            required_opn.append(span_index_map[o_sub])
 
-                # Inject missing gold aspects into top-K
-                current_asp = set(asp_topk_ids[b].tolist())
-                inject_pos = K_a - 1  # replace from tail
-                for gid in gold_asp_span_ids:
-                    if gid not in current_asp and inject_pos >= 0:
-                        asp_topk_ids[b, inject_pos] = gid
-                        asp_topk_scores[b, inject_pos] = asp_scores[b, gid]
-                        current_asp.add(gid)
-                        inject_pos -= 1
+                asp_ids = asp_topk_ids[b].tolist()
+                opn_ids = opn_topk_ids[b].tolist()
+                asp_ids = self._force_include_ids(asp_ids, required_asp)
+                opn_ids = self._force_include_ids(opn_ids, required_opn)
 
-                # Inject missing gold opinions into top-K
-                current_opn = set(opn_topk_ids[b].tolist())
-                inject_pos = K_o - 1
-                for gid in gold_opn_span_ids:
-                    if gid not in current_opn and inject_pos >= 0:
-                        opn_topk_ids[b, inject_pos] = gid
-                        opn_topk_scores[b, inject_pos] = opn_scores[b, gid]
-                        current_opn.add(gid)
-                        inject_pos -= 1
+                asp_topk_ids[b] = torch.tensor(
+                    asp_ids, device=asp_topk_ids.device, dtype=asp_topk_ids.dtype
+                )
+                opn_topk_ids[b] = torch.tensor(
+                    opn_ids, device=opn_topk_ids.device, dtype=opn_topk_ids.dtype
+                )
+
+        asp_topk_scores = torch.gather(asp_scores, 1, asp_topk_ids)
+        opn_topk_scores = torch.gather(opn_scores, 1, opn_topk_ids)
 
         expand_dim = span_reprs.size(-1)
         pruned_asp_reprs = torch.gather(

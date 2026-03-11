@@ -102,11 +102,11 @@ class Stage1Trainer:
                 self.best_f1 = dev_f1
                 self.patience_counter = 0
                 self._save_checkpoint(output_dir, "best_stage1.pt")
-                print(f"  → New best! Saved checkpoint.")
+                print(f"  -> New best! Saved checkpoint.")
             else:
                 self.patience_counter += 1
                 if self.patience_counter >= self.config.patience:
-                    print(f"  → Early stopping at epoch {epoch}")
+                    print(f"  -> Early stopping at epoch {epoch}")
                     break
 
         # Save final
@@ -165,7 +165,7 @@ class Stage1Trainer:
 
     @torch.no_grad()
     def _evaluate(self):
-        """Evaluate on dev set — collect predictions and compute metrics."""
+        """Evaluate on dev set - collect predictions and compute metrics."""
         self.model.eval()
         all_preds = []
         all_golds = []
@@ -191,31 +191,27 @@ class Stage1Trainer:
         return compute_quad_f1(all_preds, all_golds, self.id_to_cat,
                                self.cat_to_id)
 
-    def _greedy_decode(self, candidates, pair_threshold=0.1):
+    def _greedy_decode(self, candidates):
         """Simple greedy decoding from candidates.
 
-        Sort by pair_score × cat_prob, take top predictions,
+        Sort by pair_score first, then cat_prob, take top predictions,
         apply simple dedup.
-
-        Args:
-            candidates: list of candidate dicts from _build_candidates
-            pair_threshold: minimum pair_score to accept (default 0.1)
         """
         if not candidates:
             return []
 
-        # Score = pair_score * cat_prob
-        scored = []
-        for c in candidates:
-            score = c["pair_score"] * c["cat_prob"]
-            scored.append((score, c))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
+        pair_thr = getattr(self.config, "stage1_pair_score_threshold", 0.01)
+        scored = sorted(
+            candidates,
+            key=lambda c: (c["pair_score"], c["cat_prob"]),
+            reverse=True,
+        )
 
         selected = []
         seen = set()
-        for score, c in scored:
-            if c["pair_score"] < pair_threshold:
+        for c in scored:
+            # Sorted by pair_score desc, so we can stop once below threshold.
+            if c["pair_score"] < pair_thr:
                 break
             key = (c["asp_span"], c["opn_span"], c["category_id"])
             if key in seen:
@@ -238,6 +234,6 @@ class Stage1Trainer:
 
     def load_checkpoint(self, path):
         """Load model checkpoint."""
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.best_f1 = ckpt.get("best_f1", 0.0)
