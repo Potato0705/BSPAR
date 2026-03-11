@@ -40,7 +40,7 @@ stage1_pair_score_threshold: 0.01
 
 # Training
 encoder_lr: 2.0e-5
-head_lr: 1.0e-4
+head_lr: 5.0e-5
 reranker_lr: 5.0e-4
 weight_decay: 0.01
 warmup_ratio: 0.1
@@ -49,7 +49,12 @@ stage2_epochs: 10
 batch_size: 8
 gradient_accumulation: 2
 max_grad_norm: 1.0
-patience: 5
+patience: 8
+
+# Teacher Forcing Schedule
+gold_injection_start: 1.0
+gold_injection_end: 0.0
+gold_injection_warmup: 2
 
 # Data
 data_dir: data/asqp_rest15

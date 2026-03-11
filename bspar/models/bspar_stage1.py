@@ -45,7 +45,7 @@ class BSPARStage1(nn.Module):
 
     def forward(self, input_ids, attention_mask, token_type_ids=None,
                 gold_quads=None, cat_to_id=None, word_to_subword=None,
-                mode="train"):
+                mode="train", gold_injection_prob=1.0):
         """
         Args:
             input_ids: (batch, seq_len)
@@ -54,6 +54,7 @@ class BSPARStage1(nn.Module):
             cat_to_id: dict — category name → id mapping
             word_to_subword: list[list[tuple]] — word-to-subword alignment
             mode: "train" or "inference"
+            gold_injection_prob: probability of injecting each gold span (scheduled)
         """
         # Step 1: Encode
         H = self.encoder(input_ids, attention_mask, token_type_ids)
@@ -67,6 +68,7 @@ class BSPARStage1(nn.Module):
             gold_quads=gold_quads,
             word_to_subword=word_to_subword,
             mode=mode,
+            gold_injection_prob=gold_injection_prob,
         )
 
         # Step 4: Construct pair candidates
@@ -125,8 +127,14 @@ class BSPARStage1(nn.Module):
         return selected
 
     def _prune_spans(self, proposal_out, gold_quads=None,
-                     word_to_subword=None, mode="train"):
-        """Keep top-K spans, and in train mode force-include gold spans."""
+                     word_to_subword=None, mode="train",
+                     gold_injection_prob=1.0):
+        """Keep top-K spans, and in train mode force-include gold spans.
+
+        Args:
+            gold_injection_prob: probability of injecting each gold span.
+                Scheduled from 1.0 (full teacher forcing) to 0.0 (no injection).
+        """
         asp_scores = proposal_out["asp_scores"]
         opn_scores = proposal_out["opn_scores"]
         span_reprs = proposal_out["span_reprs"]
@@ -140,8 +148,11 @@ class BSPARStage1(nn.Module):
         opn_topk_ids = torch.topk(opn_scores, K_o, dim=1).indices
 
         # Teacher-forcing on spans: preserve top-K size while injecting gold spans.
-        if mode == "train" and gold_quads is not None and word_to_subword is not None:
+        # gold_injection_prob controls stochastic scheduling.
+        if (mode == "train" and gold_quads is not None
+                and word_to_subword is not None and gold_injection_prob > 0):
             span_index_map = {span: idx for idx, span in enumerate(span_indices)}
+            import random
 
             for b in range(batch_size):
                 w2s = word_to_subword[b]
@@ -149,6 +160,10 @@ class BSPARStage1(nn.Module):
                 required_opn = []
 
                 for q in gold_quads[b]:
+                    # Stochastic injection: skip this gold span with (1 - prob)
+                    if gold_injection_prob < 1.0 and random.random() > gold_injection_prob:
+                        continue
+
                     if not q.aspect.is_null:
                         a_sub = self._word_span_to_subword(
                             q.aspect.start, q.aspect.end, w2s

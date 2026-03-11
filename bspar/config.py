@@ -50,7 +50,7 @@ class BSPARConfig:
 
     # === Training ===
     encoder_lr: float = 2e-5
-    head_lr: float = 1e-4
+    head_lr: float = 5e-5
     reranker_lr: float = 5e-4
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
@@ -59,7 +59,12 @@ class BSPARConfig:
     batch_size: int = 16
     gradient_accumulation: int = 1
     max_grad_norm: float = 1.0
-    patience: int = 5                   # early stopping patience
+    patience: int = 8                   # early stopping patience
+
+    # === Teacher Forcing ===
+    gold_injection_start: float = 1.0   # gold span injection prob at epoch 1
+    gold_injection_end: float = 0.0     # gold span injection prob at final epoch
+    gold_injection_warmup: int = 2      # keep full injection for N epochs before decay
 
     # === Decode ===
     quad_score_threshold: float = 0.0

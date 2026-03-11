@@ -85,8 +85,11 @@ class Stage1Trainer:
         os.makedirs(output_dir, exist_ok=True)
 
         for epoch in range(1, self.config.stage1_epochs + 1):
+            # Compute scheduled gold injection probability
+            gold_inj_prob = self._get_gold_injection_prob(epoch)
+
             # Train
-            train_loss = self._train_epoch(epoch)
+            train_loss = self._train_epoch(epoch, gold_inj_prob)
 
             # Evaluate
             dev_metrics = self._evaluate()
@@ -95,7 +98,8 @@ class Stage1Trainer:
             print(f"Epoch {epoch}/{self.config.stage1_epochs} | "
                   f"Train Loss: {train_loss:.4f} | "
                   f"Dev Quad-F1: {dev_f1:.4f} | "
-                  f"Span-F1: {dev_metrics.get('span_f1', 0.0):.4f}")
+                  f"Span-F1: {dev_metrics.get('span_f1', 0.0):.4f} | "
+                  f"GoldInj: {gold_inj_prob:.2f}")
 
             # Early stopping
             if dev_f1 > self.best_f1:
@@ -114,7 +118,27 @@ class Stage1Trainer:
         print(f"Stage-1 training complete. Best dev F1: {self.best_f1:.4f}")
         return self.best_f1
 
-    def _train_epoch(self, epoch):
+    def _get_gold_injection_prob(self, epoch):
+        """Compute gold injection probability for scheduled teacher forcing.
+
+        Returns 1.0 during warmup epochs, then linearly decays to end value.
+        """
+        cfg = self.config
+        start = getattr(cfg, 'gold_injection_start', 1.0)
+        end = getattr(cfg, 'gold_injection_end', 0.0)
+        warmup = getattr(cfg, 'gold_injection_warmup', 2)
+
+        if epoch <= warmup:
+            return start
+
+        total_decay_epochs = cfg.stage1_epochs - warmup
+        if total_decay_epochs <= 0:
+            return start
+
+        progress = (epoch - warmup) / total_decay_epochs
+        return start + (end - start) * min(progress, 1.0)
+
+    def _train_epoch(self, epoch, gold_injection_prob=1.0):
         """Run one training epoch."""
         self.model.train()
         total_loss = 0.0
@@ -133,6 +157,7 @@ class Stage1Trainer:
                 cat_to_id=self.cat_to_id,
                 word_to_subword=word_to_subword,
                 mode="train",
+                gold_injection_prob=gold_injection_prob,
             )
 
             loss = losses["loss_total"]
