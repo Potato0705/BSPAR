@@ -20,6 +20,8 @@ class RerankSample:
     meta_features: list[float]
     label: int                      # 1=gold match, 0=negative
     difficulty: int = 0             # 0=easy, 1=partial, 2=hard negative
+    asp_span: tuple[int, int] = (-1, -1)
+    opn_span: tuple[int, int] = (-1, -1)
 
 
 @dataclass
@@ -59,12 +61,20 @@ class CandidateGenerator:
         self.model.eval()
         all_rerank = []
         example_idx = 0
+        device = next(self.model.parameters()).device
+        pair_thr = getattr(self.config, "stage1_pair_score_threshold", 0.01)
+        pair_strategy = getattr(self.config, "stage1_pair_retention_strategy", "topn_only")
+        pair_top_n = getattr(self.config, "stage1_pair_top_n", 20)
 
         for batch in dataloader:
             outputs = self.model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
+                input_ids=batch["input_ids"].to(device),
+                attention_mask=batch["attention_mask"].to(device),
                 mode="inference",
+                word_to_subword=batch.get("word_to_subword"),
+                pair_score_threshold=pair_thr,
+                pair_retention_strategy=pair_strategy,
+                pair_top_n=pair_top_n,
             )
 
             batch_size = batch["input_ids"].size(0)
@@ -89,6 +99,8 @@ class CandidateGenerator:
                         meta_features=cand["meta_features"],
                         label=label,
                         difficulty=difficulty,
+                        asp_span=tuple(cand.get("asp_span", (-1, -1))),
+                        opn_span=tuple(cand.get("opn_span", (-1, -1))),
                     )
                     rerank_ex.candidates.append(sample)
 

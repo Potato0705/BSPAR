@@ -1,6 +1,7 @@
-# BSPAR config for ACOS-Laptop
+# BSPAR config for ASQP-Rest15
 task_type: asqp
-dataset_name: acos_laptop
+dataset_name: asqp_rest15
+num_categories: 12
 num_sentiments: 3
 
 # Encoder
@@ -33,9 +34,17 @@ focal_alpha: 0.25
 focal_gamma: 2.0
 hard_neg_weight: 3.0
 ranking_margin: 1.0
+pair_pos_weight: 8.0
+pair_easy_neg_weight: 1.0
+pair_span_nearmiss_weight: 2.0
+pair_cat_confused_weight: 3.0
+pair_focal_gamma: 1.0
 
 # Decode
-stage1_pair_score_threshold: 0.01
+stage1_pair_retention_strategy: topn_only
+stage1_pair_top_n: 20
+stage1_pair_score_threshold: 0.001
+stage1_decode_pair_score_threshold: null
 
 # Training
 encoder_lr: 2.0e-5
@@ -49,6 +58,10 @@ batch_size: 8
 gradient_accumulation: 2
 max_grad_norm: 1.0
 patience: 8
+stage1_ckpt_metric: composite
+stage1_ckpt_quad_weight: 0.6
+stage1_ckpt_pair_recall_weight: 0.25
+stage1_ckpt_pos_ratio_weight: 0.15
 
 # Teacher Forcing Schedule
 gold_injection_start: 1.0
@@ -56,14 +69,14 @@ gold_injection_end: 0.0
 gold_injection_warmup: 2
 
 # Data
-data_dir: data/acos_laptop
-train_file: train.tsv
-dev_file: dev.tsv
-test_file: test.tsv
-data_format: acos
+data_dir: data/asqp_rest15
+train_file: train.txt
+dev_file: dev.txt
+test_file: test.txt
+data_format: auto
 
 # Output
-output_dir: outputs/acos_laptop
+output_dir: outputs/asqp_rest15_phase3_paircal
 
 # Seeds
 seeds:
@@ -72,3 +85,12 @@ seeds:
   - 456
   - 789
   - 1024
+
+# Stage-2: keep group loss off for pair-prior ablation
+stage2_use_group_loss: false
+stage2_group_loss_lambda: 0.0
+stage2_group_tau: 1.0
+stage2_use_pair_prior: true
+stage2_pair_prior_alpha: 0.1
+stage2_pair_prior_lambda: 0.3
+stage2_pair_prior_pos_weight: 1.0
