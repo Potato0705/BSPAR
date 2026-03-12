@@ -47,6 +47,11 @@ class BSPARConfig:
     focal_gamma: float = 2.0
     hard_neg_weight: float = 3.0
     ranking_margin: float = 1.0
+    pair_pos_weight: float = 8.0
+    pair_easy_neg_weight: float = 1.0
+    pair_span_nearmiss_weight: float = 2.0
+    pair_cat_confused_weight: float = 3.0
+    pair_focal_gamma: float = 1.0
 
     # === Training ===
     encoder_lr: float = 2e-5
@@ -60,6 +65,17 @@ class BSPARConfig:
     gradient_accumulation: int = 1
     max_grad_norm: float = 1.0
     patience: int = 8                   # early stopping patience
+    stage2_use_group_loss: bool = False
+    stage2_group_loss_lambda: float = 0.3
+    stage2_group_tau: float = 1.0
+    stage2_use_pair_prior: bool = False
+    stage2_pair_prior_alpha: float = 0.3
+    stage2_pair_prior_lambda: float = 0.3
+    stage2_pair_prior_pos_weight: float = 1.0
+    stage1_ckpt_metric: str = "composite"
+    stage1_ckpt_quad_weight: float = 0.6
+    stage1_ckpt_pair_recall_weight: float = 0.25
+    stage1_ckpt_pos_ratio_weight: float = 0.15
 
     # === Teacher Forcing ===
     gold_injection_start: float = 1.0   # gold span injection prob at epoch 1
@@ -68,7 +84,10 @@ class BSPARConfig:
 
     # === Decode ===
     quad_score_threshold: float = 0.0
+    stage1_pair_retention_strategy: str = "topn_only"  # topn_only | pair_gate_only | pair_gate_topn
+    stage1_pair_top_n: int = 20
     stage1_pair_score_threshold: float = 0.01
+    stage1_decode_pair_score_threshold: float | None = None
     nms_overlap_suppress: bool = True
 
     # === Reproducibility ===

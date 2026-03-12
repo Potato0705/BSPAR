@@ -45,7 +45,10 @@ class BSPARStage1(nn.Module):
 
     def forward(self, input_ids, attention_mask, token_type_ids=None,
                 gold_quads=None, cat_to_id=None, word_to_subword=None,
-                mode="train", gold_injection_prob=1.0):
+                mode="train", gold_injection_prob=1.0,
+                pair_score_threshold=None,
+                pair_retention_strategy=None,
+                pair_top_n=None):
         """
         Args:
             input_ids: (batch, seq_len)
@@ -55,6 +58,9 @@ class BSPARStage1(nn.Module):
             word_to_subword: list[list[tuple]] — word-to-subword alignment
             mode: "train" or "inference"
             gold_injection_prob: probability of injecting each gold span (scheduled)
+            pair_score_threshold: inference pair gate threshold override
+            pair_retention_strategy: topn_only | pair_gate_only | pair_gate_topn
+            pair_top_n: top-N pair retention cap for inference
         """
         # Step 1: Encode
         H = self.encoder(input_ids, attention_mask, token_type_ids)
@@ -84,7 +90,14 @@ class BSPARStage1(nn.Module):
             )
         else:
             return self._build_candidates(
-                proposal_out, pair_out, pruned, pair_map, word_to_subword
+                proposal_out,
+                pair_out,
+                pruned,
+                pair_map,
+                word_to_subword=word_to_subword,
+                pair_score_threshold=pair_score_threshold,
+                pair_retention_strategy=pair_retention_strategy,
+                pair_top_n=pair_top_n,
             )
 
     @staticmethod
@@ -371,7 +384,6 @@ class BSPARStage1(nn.Module):
             self._focal_bce(proposal_out["asp_scores"], asp_labels) +
             self._focal_bce(proposal_out["opn_scores"], opn_labels)
         )
-
         # =====================================================================
         # L_pair, L_cat, L_aff: Assign labels to pruned pair candidates
         # =====================================================================
@@ -381,7 +393,9 @@ class BSPARStage1(nn.Module):
                                 dtype=torch.long, device=device)
         aff_labels = torch.full((batch_size, num_pairs), -1,
                                 dtype=torch.long, device=device)
-        hard_neg_mask = torch.zeros(batch_size, num_pairs, device=device)
+        easy_neg_mask = torch.zeros(batch_size, num_pairs, device=device)
+        span_nearmiss_mask = torch.zeros(batch_size, num_pairs, device=device)
+        cat_confused_mask = torch.zeros(batch_size, num_pairs, device=device)
 
         for b in range(batch_size):
             if gold_quads is None or gold_quads[b] is None:
@@ -447,21 +461,34 @@ class BSPARStage1(nn.Module):
                     if q.sentiment in SENTIMENT_TO_ID:
                         aff_labels[b, p] = SENTIMENT_TO_ID[q.sentiment]
                 else:
-                    # Check if hard negative
-                    is_hard = (
-                        (a_span in gold_asp_spans and a_span != (-1, -1)) or
-                        (o_span in gold_opn_spans and o_span != (-1, -1))
-                    )
-                    if is_hard:
-                        hard_neg_mask[b, p] = 1.0
+                    a_is_gold = (a_span in gold_asp_spans and a_span != (-1, -1))
+                    o_is_gold = (o_span in gold_opn_spans and o_span != (-1, -1))
+                    if a_is_gold and o_is_gold:
+                        cat_confused_mask[b, p] = 1.0
+                    elif a_is_gold or o_is_gold:
+                        span_nearmiss_mask[b, p] = 1.0
+                    else:
+                        easy_neg_mask[b, p] = 1.0
 
-        # L_pair: BCE with hard negative weighting
+        # L_pair: difficulty-aware weighted BCE (+ optional focal modulation)
         pair_bce = F.binary_cross_entropy_with_logits(
             pair_out["pair_scores"], pair_labels, reduction="none"
         )
-        weight = torch.ones_like(pair_bce)
-        weight[hard_neg_mask.bool()] = self.hard_neg_weight
-        loss_pair = (pair_bce * weight).mean()
+        cfg = self.config
+        weight = torch.full_like(pair_bce, cfg.pair_easy_neg_weight)
+        weight[span_nearmiss_mask.bool()] = cfg.pair_span_nearmiss_weight
+        weight[cat_confused_mask.bool()] = cfg.pair_cat_confused_weight
+        weight[(pair_labels == 1.0)] = cfg.pair_pos_weight
+
+        pair_focal_gamma = getattr(cfg, "pair_focal_gamma", 0.0)
+        if pair_focal_gamma > 0:
+            pair_probs = torch.sigmoid(pair_out["pair_scores"])
+            p_t = pair_probs * pair_labels + (1 - pair_probs) * (1 - pair_labels)
+            pair_focal = (1 - p_t) ** pair_focal_gamma
+        else:
+            pair_focal = torch.ones_like(pair_bce)
+
+        loss_pair = (pair_bce * weight * pair_focal).mean()
 
         # L_cat and L_aff: only on positive pairs
         valid_mask = (pair_labels == 1.0) & (cat_labels >= 0)
@@ -483,7 +510,6 @@ class BSPARStage1(nn.Module):
             loss_aff = torch.tensor(0.0, device=device)
 
         # Weighted combination
-        cfg = self.config
         loss_total = (
             cfg.lambda_span * loss_span +
             cfg.lambda_pair * loss_pair +
@@ -508,11 +534,44 @@ class BSPARStage1(nn.Module):
         focal_weight = alpha_t * (1 - p_t) ** self.focal_gamma
         return (focal_weight * ce).mean()
 
+    @staticmethod
+    def _select_pair_ids(scored_ids, scored_values, strategy, pair_thr, pair_top_n):
+        """Select retained pair ids according configured strategy."""
+        if strategy == "topn_only":
+            if pair_top_n is None or pair_top_n <= 0:
+                return scored_ids
+            return scored_ids[:pair_top_n]
+
+        if strategy == "pair_gate_only":
+            return [pid for pid in scored_ids if scored_values[pid] >= pair_thr]
+
+        if strategy == "pair_gate_topn":
+            gated = [pid for pid in scored_ids if scored_values[pid] >= pair_thr]
+            if pair_top_n is None or pair_top_n <= 0:
+                return gated
+            return gated[:pair_top_n]
+
+        raise ValueError(f"Unknown pair retention strategy: {strategy}")
+
     def _build_candidates(self, proposal_out, pair_out, pruned, pair_map,
-                          word_to_subword=None):
+                          word_to_subword=None, pair_score_threshold=None,
+                          pair_retention_strategy=None, pair_top_n=None):
         """Build candidate quads for Stage-2 reranking."""
         batch_size = pair_out["pair_scores"].size(0)
         candidates_per_example = []
+        selected_pair_ids_per_example = []
+        pair_thr = (
+            getattr(self.config, "stage1_pair_score_threshold", 0.01)
+            if pair_score_threshold is None else pair_score_threshold
+        )
+        retention_strategy = (
+            getattr(self.config, "stage1_pair_retention_strategy", "topn_only")
+            if pair_retention_strategy is None else pair_retention_strategy
+        )
+        retention_top_n = (
+            getattr(self.config, "stage1_pair_top_n", 20)
+            if pair_top_n is None else pair_top_n
+        )
 
         for b in range(batch_size):
             asp_indices = pruned["asp_indices"][b]
@@ -521,14 +580,25 @@ class BSPARStage1(nn.Module):
 
             cat_probs = torch.softmax(pair_out["cat_logits"][b], dim=-1)
             aff_preds = torch.argmax(pair_out["aff_output"][b], dim=-1)
+            pair_scores = torch.sigmoid(pair_out["pair_scores"][b]).tolist()
+            scored_pair_ids = sorted(
+                range(len(pair_map)),
+                key=lambda pid: pair_scores[pid],
+                reverse=True,
+            )
+            selected_pair_ids = self._select_pair_ids(
+                scored_pair_ids,
+                pair_scores,
+                strategy=retention_strategy,
+                pair_thr=pair_thr,
+                pair_top_n=retention_top_n,
+            )
+            selected_pair_ids_per_example.append(selected_pair_ids)
 
             example_cands = []
-            for p, (ai, oi) in enumerate(pair_map):
-                pair_score = torch.sigmoid(pair_out["pair_scores"][b, p]).item()
-                # Skip low-confidence pairs
-                if pair_score < 0.01:
-                    continue
-
+            for p in selected_pair_ids:
+                ai, oi = pair_map[p]
+                pair_score = pair_scores[p]
                 a_span_sub = asp_indices[ai]
                 o_span_sub = opn_indices[oi]
 
@@ -595,4 +665,11 @@ class BSPARStage1(nn.Module):
             "pair_scores": pair_out["pair_scores"],
             "cat_logits": pair_out["cat_logits"],
             "aff_output": pair_out["aff_output"],
+            "pair_map": pair_map,
+            "asp_indices": pruned["asp_indices"],
+            "opn_indices": pruned["opn_indices"],
+            "selected_pair_ids": selected_pair_ids_per_example,
+            "pair_retention_strategy": retention_strategy,
+            "pair_top_n": retention_top_n,
+            "pair_score_threshold": pair_thr,
         }
