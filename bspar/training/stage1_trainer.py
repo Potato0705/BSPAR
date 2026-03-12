@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import LinearLR, SequentialLR
 
 from ..models.bspar_stage1 import BSPARStage1
 from ..data.dataset import BSPARStage1Dataset, collate_stage1
-from ..evaluation.metrics import compute_quad_f1
+from ..evaluation.metrics import compute_quad_f1, compute_a3_diagnostics
 
 
 class Stage1Trainer:
@@ -94,8 +94,10 @@ class Stage1Trainer:
             # Train
             train_loss = self._train_epoch(epoch, gold_inj_prob)
 
-            # Evaluate
-            dev_metrics = self._evaluate()
+            # Evaluate (run A3 diagnostics on last epoch or when patience runs out)
+            is_last = (epoch == self.config.stage1_epochs or
+                       self.patience_counter >= self.config.patience - 1)
+            dev_metrics = self._evaluate(run_a3=is_last)
             dev_f1 = dev_metrics.get("quad_f1", 0.0)
             ckpt_score = self._checkpoint_selection_score(dev_metrics)
 
@@ -107,6 +109,17 @@ class Stage1Trainer:
                   f"PosRetainR: {dev_metrics.get('sample_has_positive_after_retention_ratio', 0.0):.4f} | "
                   f"CkptScore: {ckpt_score:.4f} | "
                   f"GoldInj: {gold_inj_prob:.2f}")
+
+            if "a3" in dev_metrics:
+                a3 = dev_metrics["a3"]
+                print(f"  [A3] count={a3.get('a3_count', 0)} | "
+                      f"gold_rank_mean={a3.get('gold_pair_mean_rank', -1):.1f} "
+                      f"med={a3.get('gold_pair_median_rank', -1)} | "
+                      f"score_gap_mean={a3.get('score_gap_mean', 0):.4f} "
+                      f"med={a3.get('score_gap_median', 0):.4f} | "
+                      f"null_outr={a3.get('null_outranker_ratio', 0):.2%} "
+                      f"nearmiss_outr={a3.get('near_miss_outranker_ratio', 0):.2%} | "
+                      f"pos_retention={a3.get('sample_has_positive_after_retention_ratio', 0):.4f}")
 
             # Early stopping
             if ckpt_score > self.best_score:
@@ -122,6 +135,12 @@ class Stage1Trainer:
                     print(f"  -> Early stopping at epoch {epoch}")
                     break
 
+        # Final evaluation with full A3 diagnostics on best model
+        best_ckpt = os.path.join(output_dir, "best_stage1.pt")
+        if os.path.exists(best_ckpt):
+            self.load_checkpoint(best_ckpt)
+        final_metrics = self._evaluate(run_a3=True)
+
         # Save final
         self._save_checkpoint(output_dir, "final_stage1.pt")
         print(
@@ -129,7 +148,20 @@ class Stage1Trainer:
             f"Best ckpt score: {self.best_score:.4f} | "
             f"Best epoch: {self.best_epoch}"
         )
-        return self.best_f1
+        if "a3" in final_metrics:
+            a3 = final_metrics["a3"]
+            print(f"  Final A3 diagnostics:")
+            print(f"    a3_count={a3.get('a3_count', 0)}")
+            print(f"    gold_pair_mean_rank={a3.get('gold_pair_mean_rank', -1):.2f}")
+            print(f"    gold_pair_median_rank={a3.get('gold_pair_median_rank', -1)}")
+            print(f"    score_gap_mean={a3.get('score_gap_mean', 0):.4f}")
+            print(f"    score_gap_median={a3.get('score_gap_median', 0):.4f}")
+            print(f"    null_outranker_ratio={a3.get('null_outranker_ratio', 0):.4f}")
+            print(f"    near_miss_outranker_ratio={a3.get('near_miss_outranker_ratio', 0):.4f}")
+            print(f"    sample_has_positive_after_retention_ratio="
+                  f"{a3.get('sample_has_positive_after_retention_ratio', 0):.4f}")
+
+        return final_metrics
 
     def _checkpoint_selection_score(self, metrics):
         """Compute scalar score for selecting best Stage-1 checkpoint."""
@@ -212,18 +244,25 @@ class Stage1Trainer:
 
             if (batch_idx + 1) % 10 == 0:
                 avg = total_loss / num_batches
+                pr = losses.get('loss_pair_rank', 0.0)
+                pr_val = pr.item() if hasattr(pr, 'item') else pr
                 print(f"  Batch {batch_idx+1}/{len(self.train_loader)} | "
                       f"Loss: {avg:.4f} | "
                       f"span: {losses['loss_span']:.3f} "
                       f"pair: {losses['loss_pair']:.3f} "
                       f"cat: {losses['loss_cat']:.3f} "
-                      f"aff: {losses['loss_aff']:.3f}")
+                      f"aff: {losses['loss_aff']:.3f} "
+                      f"prank: {pr_val:.3f}")
 
         return total_loss / max(num_batches, 1)
 
     @torch.no_grad()
-    def _evaluate(self):
-        """Evaluate on dev set - collect predictions and compute metrics."""
+    def _evaluate(self, run_a3=False):
+        """Evaluate on dev set - collect predictions and compute metrics.
+
+        Args:
+            run_a3: if True, also compute A3 diagnostic metrics
+        """
         self.model.eval()
         all_preds = []
         all_golds = []
@@ -231,6 +270,7 @@ class Stage1Trainer:
         pair_strategy = getattr(self.config, "stage1_pair_retention_strategy", "topn_only")
         pair_top_n = getattr(self.config, "stage1_pair_top_n", 20)
         pair_flow = self._init_pair_flow_stats(pair_thr, pair_strategy, pair_top_n)
+        all_raw_cands = [] if run_a3 else None
 
         for batch in self.dev_loader:
             input_ids = batch["input_ids"].to(self.device)
@@ -253,6 +293,8 @@ class Stage1Trainer:
                 all_preds.append(preds)
                 all_golds.append(batch["gold_quads"][b_idx])
                 self._update_pair_flow_stats(pair_flow, outputs, batch, b_idx)
+                if run_a3:
+                    all_raw_cands.append(cands)
 
         metrics = compute_quad_f1(all_preds, all_golds, self.id_to_cat,
                                   self.cat_to_id)
@@ -270,6 +312,13 @@ class Stage1Trainer:
             f"pos q50/q90: {pair_flow_metrics['pos_pair_score_q50']:.4f}/{pair_flow_metrics['pos_pair_score_q90']:.4f} | "
             f"neg q50/q90: {pair_flow_metrics['neg_pair_score_q50']:.4f}/{pair_flow_metrics['neg_pair_score_q90']:.4f}"
         )
+
+        if run_a3:
+            a3 = compute_a3_diagnostics(
+                all_raw_cands, all_golds, self.cat_to_id,
+                top_n=getattr(self.config, "stage1_pair_top_n", 20),
+            )
+            metrics["a3"] = a3
 
         return metrics
 

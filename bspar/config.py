@@ -57,6 +57,10 @@ class BSPARConfig:
     lambda_recall: float = 1.0       # weight for recall margin loss
     span_recall_margin: float = 0.5  # margin above top-K threshold for gold spans
 
+    # === Pair Ranking Loss (fix A3: gold pairs outranked by hard negatives) ===
+    lambda_pair_rank: float = 0.0    # weight for pair-level ranking loss (0 = disabled)
+    pair_rank_margin: float = 0.1    # margin: gold pair must beat hard neg by this much
+
     # === Training ===
     encoder_lr: float = 2e-5
     head_lr: float = 5e-5

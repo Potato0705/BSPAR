@@ -396,6 +396,7 @@ class BSPARStage1(nn.Module):
         easy_neg_mask = torch.zeros(batch_size, num_pairs, device=device)
         span_nearmiss_mask = torch.zeros(batch_size, num_pairs, device=device)
         cat_confused_mask = torch.zeros(batch_size, num_pairs, device=device)
+        null_neg_mask = torch.zeros(batch_size, num_pairs, device=device)
 
         for b in range(batch_size):
             if gold_quads is None or gold_quads[b] is None:
@@ -469,6 +470,9 @@ class BSPARStage1(nn.Module):
                         span_nearmiss_mask[b, p] = 1.0
                     else:
                         easy_neg_mask[b, p] = 1.0
+                    # Also track NULL-related negatives for ranking loss
+                    if a_span == (-1, -1) or o_span == (-1, -1):
+                        null_neg_mask[b, p] = 1.0
 
         # L_pair: difficulty-aware weighted BCE (+ optional focal modulation)
         pair_bce = F.binary_cross_entropy_with_logits(
@@ -489,6 +493,29 @@ class BSPARStage1(nn.Module):
             pair_focal = torch.ones_like(pair_bce)
 
         loss_pair = (pair_bce * weight * pair_focal).mean()
+
+        # L_pair_rank: margin ranking loss on hard negatives
+        loss_pair_rank = torch.tensor(0.0, device=device)
+        if cfg.lambda_pair_rank > 0:
+            pair_scores_sig = torch.sigmoid(pair_out["pair_scores"])
+            # Combined hard neg mask: NULL-related OR span near-miss OR cat-confused
+            rank_neg_mask = ((null_neg_mask + span_nearmiss_mask + cat_confused_mask) > 0).float()
+            margin = cfg.pair_rank_margin
+            num_rank_pairs = 0
+            for b in range(batch_size):
+                pos_idx = (pair_labels[b] == 1.0).nonzero(as_tuple=True)[0]
+                neg_idx = (rank_neg_mask[b] > 0).nonzero(as_tuple=True)[0]
+                if len(pos_idx) == 0 or len(neg_idx) == 0:
+                    continue
+                pos_scores = pair_scores_sig[b, pos_idx]       # (num_pos,)
+                neg_scores = pair_scores_sig[b, neg_idx]       # (num_neg,)
+                # Pairwise: (num_pos, 1) vs (1, num_neg)
+                diff = pos_scores.unsqueeze(1) - neg_scores.unsqueeze(0)
+                pair_rank_loss = torch.clamp(margin - diff, min=0.0)
+                loss_pair_rank = loss_pair_rank + pair_rank_loss.sum()
+                num_rank_pairs += pair_rank_loss.numel()
+            if num_rank_pairs > 0:
+                loss_pair_rank = loss_pair_rank / num_rank_pairs
 
         # L_cat and L_aff: only on positive pairs
         valid_mask = (pair_labels == 1.0) & (cat_labels >= 0)
@@ -514,7 +541,8 @@ class BSPARStage1(nn.Module):
             cfg.lambda_span * loss_span +
             cfg.lambda_pair * loss_pair +
             cfg.lambda_cat * loss_cat +
-            cfg.lambda_aff * loss_aff
+            cfg.lambda_aff * loss_aff +
+            cfg.lambda_pair_rank * loss_pair_rank
         )
 
         return {
@@ -523,6 +551,7 @@ class BSPARStage1(nn.Module):
             "loss_pair": loss_pair.detach(),
             "loss_cat": loss_cat.detach(),
             "loss_aff": loss_aff.detach(),
+            "loss_pair_rank": loss_pair_rank.detach() if isinstance(loss_pair_rank, torch.Tensor) else loss_pair_rank,
         }
 
     def _focal_bce(self, logits, targets):
