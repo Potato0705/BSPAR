@@ -53,6 +53,10 @@ class BSPARConfig:
     pair_cat_confused_weight: float = 3.0
     pair_focal_gamma: float = 1.0
 
+    # === Span Recall Loss (Claim A: ensure gold spans survive top-K pruning) ===
+    lambda_recall: float = 1.0       # weight for recall margin loss
+    span_recall_margin: float = 0.5  # margin above top-K threshold for gold spans
+
     # === Training ===
     encoder_lr: float = 2e-5
     head_lr: float = 5e-5
