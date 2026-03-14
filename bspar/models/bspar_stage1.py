@@ -343,6 +343,62 @@ class BSPARStage1(nn.Module):
             return (word_start, word_end)
         return (-1, -1)
 
+    @staticmethod
+    def _span_overlap(span_a, span_b):
+        """Whether two inclusive spans overlap."""
+        if span_a == (-1, -1) or span_b == (-1, -1):
+            return False
+        return not (span_a[1] < span_b[0] or span_b[1] < span_a[0])
+
+    def _compute_pair_rank_loss(
+        self,
+        pair_probs,
+        pair_labels,
+        null_related_mask,
+        semantic_nearmiss_rank_mask,
+        cat_confused_mask,
+    ):
+        """Margin loss over the hardest Stage-1 pair negatives."""
+        cfg = self.config
+        margin = float(getattr(cfg, "pair_rank_margin", 0.1))
+        hard_neg_cap = max(int(getattr(cfg, "stage1_pair_top_n", 20)), 1)
+
+        hard_neg_mask = (
+            (pair_labels == 0.0) &
+            (
+                null_related_mask.bool() |
+                semantic_nearmiss_rank_mask.bool() |
+                cat_confused_mask.bool()
+            )
+        )
+
+        total_loss = pair_probs.sum() * 0.0
+        total_pairs = 0
+
+        for b in range(pair_probs.size(0)):
+            pos_scores = pair_probs[b][pair_labels[b] == 1.0]
+            hard_neg_scores = pair_probs[b][hard_neg_mask[b]]
+
+            if pos_scores.numel() == 0 or hard_neg_scores.numel() == 0:
+                continue
+
+            if hard_neg_scores.numel() > hard_neg_cap:
+                hard_neg_scores = torch.topk(
+                    hard_neg_scores,
+                    hard_neg_cap,
+                    largest=True,
+                ).values
+
+            diff = pos_scores.unsqueeze(1) - hard_neg_scores.unsqueeze(0)
+            rank_loss = torch.clamp(margin - diff, min=0.0)
+            total_loss = total_loss + rank_loss.sum()
+            total_pairs += rank_loss.numel()
+
+        if total_pairs > 0:
+            total_loss = total_loss / total_pairs
+
+        return total_loss
+
     def _compute_stage1_losses(self, proposal_out, pair_out, pruned, pair_map,
                                 gold_quads, cat_to_id, word_to_subword):
         """Compute L_span + L_pair + L_cat + L_aff with full label assignment."""
@@ -396,6 +452,8 @@ class BSPARStage1(nn.Module):
         easy_neg_mask = torch.zeros(batch_size, num_pairs, device=device)
         span_nearmiss_mask = torch.zeros(batch_size, num_pairs, device=device)
         cat_confused_mask = torch.zeros(batch_size, num_pairs, device=device)
+        null_related_mask = torch.zeros(batch_size, num_pairs, device=device)
+        semantic_nearmiss_rank_mask = torch.zeros(batch_size, num_pairs, device=device)
 
         for b in range(batch_size):
             if gold_quads is None or gold_quads[b] is None:
@@ -470,6 +528,21 @@ class BSPARStage1(nn.Module):
                     else:
                         easy_neg_mask[b, p] = 1.0
 
+                    is_null_related = (a_span == (-1, -1) or o_span == (-1, -1))
+                    if is_null_related:
+                        null_related_mask[b, p] = 1.0
+                    elif cat_confused_mask[b, p] == 0:
+                        a_overlap = any(
+                            self._span_overlap(a_span, gold_span)
+                            for gold_span in gold_asp_spans
+                        )
+                        o_overlap = any(
+                            self._span_overlap(o_span, gold_span)
+                            for gold_span in gold_opn_spans
+                        )
+                        if a_overlap and o_overlap:
+                            semantic_nearmiss_rank_mask[b, p] = 1.0
+
         # L_pair: difficulty-aware weighted BCE (+ optional focal modulation)
         pair_bce = F.binary_cross_entropy_with_logits(
             pair_out["pair_scores"], pair_labels, reduction="none"
@@ -480,15 +553,25 @@ class BSPARStage1(nn.Module):
         weight[cat_confused_mask.bool()] = cfg.pair_cat_confused_weight
         weight[(pair_labels == 1.0)] = cfg.pair_pos_weight
 
+        pair_probs = torch.sigmoid(pair_out["pair_scores"])
         pair_focal_gamma = getattr(cfg, "pair_focal_gamma", 0.0)
         if pair_focal_gamma > 0:
-            pair_probs = torch.sigmoid(pair_out["pair_scores"])
             p_t = pair_probs * pair_labels + (1 - pair_probs) * (1 - pair_labels)
             pair_focal = (1 - p_t) ** pair_focal_gamma
         else:
             pair_focal = torch.ones_like(pair_bce)
 
         loss_pair = (pair_bce * weight * pair_focal).mean()
+        if float(getattr(cfg, "lambda_pair_rank", 0.0)) > 0:
+            loss_pair_rank = self._compute_pair_rank_loss(
+                pair_probs=pair_probs,
+                pair_labels=pair_labels,
+                null_related_mask=null_related_mask,
+                semantic_nearmiss_rank_mask=semantic_nearmiss_rank_mask,
+                cat_confused_mask=cat_confused_mask,
+            )
+        else:
+            loss_pair_rank = torch.tensor(0.0, device=device)
 
         # L_cat and L_aff: only on positive pairs
         valid_mask = (pair_labels == 1.0) & (cat_labels >= 0)
@@ -513,6 +596,7 @@ class BSPARStage1(nn.Module):
         loss_total = (
             cfg.lambda_span * loss_span +
             cfg.lambda_pair * loss_pair +
+            cfg.lambda_pair_rank * loss_pair_rank +
             cfg.lambda_cat * loss_cat +
             cfg.lambda_aff * loss_aff
         )
@@ -521,6 +605,7 @@ class BSPARStage1(nn.Module):
             "loss_total": loss_total,
             "loss_span": loss_span.detach(),
             "loss_pair": loss_pair.detach(),
+            "loss_pair_rank": loss_pair_rank.detach(),
             "loss_cat": loss_cat.detach(),
             "loss_aff": loss_aff.detach(),
         }

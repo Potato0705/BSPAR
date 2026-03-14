@@ -52,6 +52,8 @@ class BSPARConfig:
     pair_span_nearmiss_weight: float = 2.0
     pair_cat_confused_weight: float = 3.0
     pair_focal_gamma: float = 1.0
+    lambda_pair_rank: float = 0.0
+    pair_rank_margin: float = 0.1
 
     # === Training ===
     encoder_lr: float = 2e-5

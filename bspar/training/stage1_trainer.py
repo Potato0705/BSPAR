@@ -1,6 +1,7 @@
 """Stage-1 training loop: Encoder + SpanProposal + PairModule joint training."""
 
 import os
+import json
 import time
 import math
 import torch
@@ -10,7 +11,7 @@ from torch.optim.lr_scheduler import LinearLR, SequentialLR
 
 from ..models.bspar_stage1 import BSPARStage1
 from ..data.dataset import BSPARStage1Dataset, collate_stage1
-from ..evaluation.metrics import compute_quad_f1
+from ..evaluation.metrics import compute_quad_f1, compute_a3_diagnostics
 
 
 class Stage1Trainer:
@@ -82,6 +83,8 @@ class Stage1Trainer:
         self.best_score = float("-inf")
         self.best_epoch = 0
         self.patience_counter = 0
+        self.best_dev_metrics = {}
+        self.final_dev_metrics = {}
 
     def train(self, output_dir: str):
         """Run full Stage-1 training with early stopping."""
@@ -113,8 +116,10 @@ class Stage1Trainer:
                 self.best_f1 = dev_f1
                 self.best_score = ckpt_score
                 self.best_epoch = epoch
+                self.best_dev_metrics = dict(dev_metrics)
                 self.patience_counter = 0
                 self._save_checkpoint(output_dir, "best_stage1.pt")
+                self._save_a3_diagnostics(output_dir, "best_stage1_a3_diagnostics.json")
                 print(f"  -> New best! Saved checkpoint.")
             else:
                 self.patience_counter += 1
@@ -123,7 +128,9 @@ class Stage1Trainer:
                     break
 
         # Save final
+        self.final_dev_metrics = dict(dev_metrics)
         self._save_checkpoint(output_dir, "final_stage1.pt")
+        self._save_a3_diagnostics(output_dir, "final_stage1_a3_diagnostics.json")
         print(
             f"Stage-1 training complete. Best dev F1: {self.best_f1:.4f} | "
             f"Best ckpt score: {self.best_score:.4f} | "
@@ -216,6 +223,7 @@ class Stage1Trainer:
                       f"Loss: {avg:.4f} | "
                       f"span: {losses['loss_span']:.3f} "
                       f"pair: {losses['loss_pair']:.3f} "
+                      f"pair_rank: {losses.get('loss_pair_rank', 0.0):.3f} "
                       f"cat: {losses['loss_cat']:.3f} "
                       f"aff: {losses['loss_aff']:.3f}")
 
@@ -403,6 +411,80 @@ class Stage1Trainer:
             stats["sample_with_gold_pair"] += 1
             if len(gold_pairs & after_gate) > 0:
                 stats["sample_has_positive_after_retention"] += 1
+
+    def _build_a3_diagnostic_record(self, outputs, batch, b_idx):
+        """Build one per-example record for A3 rank diagnostics."""
+        pair_map = list(outputs.get("pair_map", []))
+        asp_indices_batch = outputs.get("asp_indices", [])
+        opn_indices_batch = outputs.get("opn_indices", [])
+        selected_pair_ids_batch = outputs.get("selected_pair_ids", [])
+
+        if b_idx >= len(asp_indices_batch) or b_idx >= len(opn_indices_batch):
+            return None
+
+        pair_scores = torch.sigmoid(outputs["pair_scores"][b_idx]).detach().cpu().tolist()
+        selected_pair_ids = (
+            selected_pair_ids_batch[b_idx]
+            if b_idx < len(selected_pair_ids_batch) else []
+        )
+        gold_pairs = sorted(
+            self._gold_pairs_subword(
+                batch["gold_quads"][b_idx],
+                batch["word_to_subword"][b_idx],
+            )
+        )
+
+        return {
+            "pair_scores": pair_scores,
+            "pair_map": pair_map,
+            "asp_indices": [tuple(span) for span in asp_indices_batch[b_idx]],
+            "opn_indices": [tuple(span) for span in opn_indices_batch[b_idx]],
+            "selected_pair_ids": list(selected_pair_ids),
+            "gold_pairs": list(gold_pairs),
+        }
+
+    @torch.no_grad()
+    def _run_a3_diagnostics(self):
+        """Run a dev-only A3 diagnostic pass on the current model."""
+        self.model.eval()
+        pair_thr = getattr(self.config, "stage1_pair_score_threshold", 0.01)
+        pair_strategy = getattr(self.config, "stage1_pair_retention_strategy", "topn_only")
+        pair_top_n = getattr(self.config, "stage1_pair_top_n", 20)
+        records = []
+
+        for batch in self.dev_loader:
+            input_ids = batch["input_ids"].to(self.device)
+            attention_mask = batch["attention_mask"].to(self.device)
+
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                word_to_subword=batch["word_to_subword"],
+                mode="inference",
+                pair_score_threshold=pair_thr,
+                pair_retention_strategy=pair_strategy,
+                pair_top_n=pair_top_n,
+            )
+
+            for b_idx in range(len(outputs["candidates"])):
+                record = self._build_a3_diagnostic_record(outputs, batch, b_idx)
+                if record is not None:
+                    records.append(record)
+
+        diagnostics = compute_a3_diagnostics(records, pair_top_n)
+        diagnostics["pair_retention"] = {
+            "strategy": pair_strategy,
+            "pair_top_n": pair_top_n,
+            "pair_score_threshold": pair_thr,
+        }
+        return diagnostics
+
+    def _save_a3_diagnostics(self, output_dir, filename):
+        path = os.path.join(output_dir, filename)
+        diagnostics = self._run_a3_diagnostics()
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(diagnostics, f, ensure_ascii=False, indent=2)
+        print(f"  -> Saved A3 diagnostics: {path}")
 
     def _finalize_pair_flow_stats(self, stats):
         gold_total = max(stats["gold_pair_total"], 1)

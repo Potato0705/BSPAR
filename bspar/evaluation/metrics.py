@@ -177,3 +177,180 @@ def compute_quad_f1(pred_cand_lists, gold_quad_lists, id_to_cat, cat_to_id):
         "asp_f1": sf1_asp["f1"],
         "opn_f1": sf1_opn["f1"],
     }
+
+
+def _quantile(values, q):
+    if not values:
+        return 0.0
+    xs = sorted(values)
+    idx = int((len(xs) - 1) * q)
+    idx = max(0, min(len(xs) - 1, idx))
+    return float(xs[idx])
+
+
+def _span_overlap(span_a, span_b):
+    if span_a == (-1, -1) or span_b == (-1, -1):
+        return False
+    return not (span_a[1] < span_b[0] or span_b[1] < span_a[0])
+
+
+def _classify_a3_outranker(cand_pair, gold_pair, gold_asps, gold_opns):
+    del gold_pair
+    cand_asp, cand_opn = cand_pair
+    if cand_asp == (-1, -1) or cand_opn == (-1, -1):
+        return "NULL"
+
+    asp_near = (
+        cand_asp in gold_asps or
+        any(_span_overlap(cand_asp, gold_asp) for gold_asp in gold_asps)
+    )
+    opn_near = (
+        cand_opn in gold_opns or
+        any(_span_overlap(cand_opn, gold_opn) for gold_opn in gold_opns)
+    )
+    if asp_near and opn_near:
+        return "near_miss"
+    return "other"
+
+
+def compute_a3_diagnostics(example_records, pair_top_n):
+    """Summarize A3 behavior from per-example Stage-1 pair-space records.
+
+    Args:
+        example_records: list of dict. Each dict must contain:
+            pair_scores: list[float]
+            pair_map: list[tuple[int, int]]
+            asp_indices: list[tuple[int, int]]
+            opn_indices: list[tuple[int, int]]
+            selected_pair_ids: list[int]
+            gold_pairs: list[tuple[tuple[int, int], tuple[int, int]]]
+        pair_top_n: fixed top-N pair retention budget
+    """
+    a3_gold_pair_ranks = []
+    a3_score_gaps = []
+    first_outranker_type_counts = Counter()
+
+    total_gold_pairs = 0
+    total_gold_pairs_in_pair_space = 0
+    total_a3_gold_pairs = 0
+    sample_with_gold_pair = 0
+    sample_has_positive_after_retention = 0
+
+    for record in example_records:
+        pair_scores = list(record.get("pair_scores", []))
+        pair_map = list(record.get("pair_map", []))
+        asp_indices = [tuple(span) for span in record.get("asp_indices", [])]
+        opn_indices = [tuple(span) for span in record.get("opn_indices", [])]
+        selected_pair_ids = set(record.get("selected_pair_ids", []))
+        gold_pairs = {
+            (tuple(pair[0]), tuple(pair[1]))
+            for pair in record.get("gold_pairs", [])
+        }
+
+        if gold_pairs:
+            sample_with_gold_pair += 1
+        total_gold_pairs += len(gold_pairs)
+
+        if not pair_scores or not pair_map:
+            continue
+
+        pairid_to_key = {}
+        for pid, (ai, oi) in enumerate(pair_map):
+            if ai >= len(asp_indices) or oi >= len(opn_indices):
+                continue
+            pairid_to_key[pid] = (asp_indices[ai], opn_indices[oi])
+
+        retained_pairs = {
+            pairid_to_key[pid]
+            for pid in selected_pair_ids
+            if pid in pairid_to_key
+        }
+        if gold_pairs & retained_pairs:
+            sample_has_positive_after_retention += 1
+
+        sorted_ids = sorted(
+            pairid_to_key.keys(),
+            key=lambda pid: pair_scores[pid],
+            reverse=True,
+        )
+        if not sorted_ids:
+            continue
+
+        rank_map = {pid: rank + 1 for rank, pid in enumerate(sorted_ids)}
+        top_n = int(pair_top_n) if pair_top_n is not None else len(sorted_ids)
+        top_n = max(1, min(top_n, len(sorted_ids)))
+        top_n_score = pair_scores[sorted_ids[top_n - 1]]
+
+        pairkey_to_pid = {}
+        for pid, pair_key in pairid_to_key.items():
+            if pair_key not in pairkey_to_pid:
+                pairkey_to_pid[pair_key] = pid
+
+        gold_asps = {pair[0] for pair in gold_pairs}
+        gold_opns = {pair[1] for pair in gold_pairs}
+
+        for gold_pair in gold_pairs:
+            pid = pairkey_to_pid.get(gold_pair)
+            if pid is None:
+                continue
+
+            total_gold_pairs_in_pair_space += 1
+            if pid in selected_pair_ids:
+                continue
+
+            total_a3_gold_pairs += 1
+            a3_gold_pair_ranks.append(rank_map[pid])
+            a3_score_gaps.append(top_n_score - pair_scores[pid])
+
+            first_type = "other"
+            for outrank_pid in sorted_ids:
+                if rank_map[outrank_pid] >= rank_map[pid]:
+                    break
+                cand_pair = pairid_to_key[outrank_pid]
+                if cand_pair in gold_pairs:
+                    continue
+                first_type = _classify_a3_outranker(
+                    cand_pair,
+                    gold_pair,
+                    gold_asps,
+                    gold_opns,
+                )
+                break
+            first_outranker_type_counts[first_type] += 1
+
+    outranker_total = sum(first_outranker_type_counts.values())
+    return {
+        "counts": {
+            "total_gold_pairs": int(total_gold_pairs),
+            "total_gold_pairs_in_pair_space": int(total_gold_pairs_in_pair_space),
+            "total_a3_gold_pairs": int(total_a3_gold_pairs),
+        },
+        "gold_pair_rank": {
+            "mean": (
+                float(sum(a3_gold_pair_ranks) / len(a3_gold_pair_ranks))
+                if a3_gold_pair_ranks else 0.0
+            ),
+            "median": _quantile(a3_gold_pair_ranks, 0.5),
+        },
+        "score_topn_minus_gold_pair": {
+            "mean": (
+                float(sum(a3_score_gaps) / len(a3_score_gaps))
+                if a3_score_gaps else 0.0
+            ),
+            "median": _quantile(a3_score_gaps, 0.5),
+        },
+        "first_outranker_type_ratio": {
+            label: {
+                "count": int(first_outranker_type_counts.get(label, 0)),
+                "ratio": (
+                    float(first_outranker_type_counts.get(label, 0) / outranker_total)
+                    if outranker_total > 0 else 0.0
+                ),
+            }
+            for label in ["NULL", "near_miss", "other"]
+        },
+        "sample_has_positive_after_retention_ratio": (
+            float(sample_has_positive_after_retention / sample_with_gold_pair)
+            if sample_with_gold_pair > 0 else 0.0
+        ),
+    }
