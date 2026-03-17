@@ -13,10 +13,26 @@ class PairModule(nn.Module):
 
     def __init__(self, span_repr_size: int, num_categories: int,
                  num_sentiments: int = 3, dist_buckets: int = 16,
-                 order_types: int = 3, task_type: str = "asqp"):
+                 order_types: int = 3, task_type: str = "asqp",
+                 use_acr_refine: bool = False,
+                 use_acr_cat_refine: bool = False,
+                 use_acr_aff_refine: bool = False,
+                 acr_hidden_dim: int = 128,
+                 acr_apply_to: str = "cat_aff",
+                 acr_use_layernorm: bool = True):
         super().__init__()
         self.task_type = task_type
         self.num_categories = num_categories
+
+        # Backward compatibility:
+        # legacy use_acr_refine=True means apply to both cat+aff unless split flags are set.
+        if bool(use_acr_refine) and not bool(use_acr_cat_refine) and not bool(use_acr_aff_refine):
+            use_acr_cat_refine = True
+            use_acr_aff_refine = True
+        self.use_acr_cat_refine = bool(use_acr_cat_refine)
+        self.use_acr_aff_refine = bool(use_acr_aff_refine)
+        self.use_acr_refine = self.use_acr_cat_refine or self.use_acr_aff_refine
+        self.acr_apply_to = acr_apply_to
 
         # Structural feature embeddings
         self.dist_embedding = nn.Embedding(dist_buckets, 32)
@@ -41,6 +57,28 @@ class PairModule(nn.Module):
             self.aff_head = nn.Linear(self.pair_repr_size, num_sentiments)
         else:  # dimabsa
             self.aff_head = nn.Linear(self.pair_repr_size, 2)  # (valence, arousal)
+
+        if self.use_acr_refine:
+            self.acr_norm = (
+                nn.LayerNorm(self.pair_repr_size)
+                if acr_use_layernorm
+                else nn.Identity()
+            )
+            self.acr_gamma = nn.Sequential(
+                nn.Linear(span_repr_size, acr_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(acr_hidden_dim, self.pair_repr_size),
+            )
+            self.acr_beta = nn.Sequential(
+                nn.Linear(span_repr_size, acr_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(acr_hidden_dim, self.pair_repr_size),
+            )
+            # Start from identity-like refinement to avoid destabilizing old behavior.
+            nn.init.zeros_(self.acr_gamma[-1].weight)
+            nn.init.zeros_(self.acr_gamma[-1].bias)
+            nn.init.zeros_(self.acr_beta[-1].weight)
+            nn.init.zeros_(self.acr_beta[-1].bias)
 
     def forward(self, asp_reprs: torch.Tensor, opn_reprs: torch.Tensor,
                 dist_ids: torch.Tensor, order_ids: torch.Tensor) -> dict:
@@ -72,10 +110,21 @@ class PairModule(nn.Module):
 
         pair_reprs = self.pair_proj(pair_input)
 
-        # Multi-task predictions
+        # Keep pair scoring on original pair representations.
         pair_scores = self.pair_scorer(pair_reprs).squeeze(-1)
-        cat_logits = self.cat_head(pair_reprs)
-        aff_output = self.aff_head(pair_reprs)
+
+        # Optional aspect-conditioned refinement for materialization heads only.
+        cat_aff_reprs = pair_reprs
+        if self.use_acr_refine and self.acr_apply_to == "cat_aff":
+            gamma = self.acr_gamma(asp_reprs)
+            beta = self.acr_beta(asp_reprs)
+            cat_aff_reprs = self.acr_norm(pair_reprs) * (1.0 + gamma) + beta
+
+        cat_input = cat_aff_reprs if self.use_acr_cat_refine else pair_reprs
+        aff_input = cat_aff_reprs if self.use_acr_aff_refine else pair_reprs
+
+        cat_logits = self.cat_head(cat_input)
+        aff_output = self.aff_head(aff_input)
 
         return {
             "pair_reprs": pair_reprs,

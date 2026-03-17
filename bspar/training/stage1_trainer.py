@@ -219,13 +219,70 @@ class Stage1Trainer:
 
             if (batch_idx + 1) % 10 == 0:
                 avg = total_loss / num_batches
-                print(f"  Batch {batch_idx+1}/{len(self.train_loader)} | "
-                      f"Loss: {avg:.4f} | "
-                      f"span: {losses['loss_span']:.3f} "
-                      f"pair: {losses['loss_pair']:.3f} "
-                      f"pair_rank: {losses.get('loss_pair_rank', 0.0):.3f} "
-                      f"cat: {losses['loss_cat']:.3f} "
-                      f"aff: {losses['loss_aff']:.3f}")
+                msg = (
+                    f"  Batch {batch_idx+1}/{len(self.train_loader)} | "
+                    f"Loss: {avg:.4f} | "
+                    f"span: {losses['loss_span']:.3f} "
+                    f"pair: {losses['loss_pair']:.3f} "
+                    f"pair_rank: {losses.get('loss_pair_rank', 0.0):.3f} "
+                    f"cat: {losses['loss_cat']:.3f} "
+                    f"aff: {losses['loss_aff']:.3f}"
+                )
+                if bool(getattr(self.config, "use_pacr_loss", False)):
+                    msg += (
+                        f" pacr_loss_mean: {losses.get('pacr_loss_mean', 0.0):.3f} "
+                        f"pacr_active_pairs: {int(losses.get('pacr_active_pairs', 0))} "
+                        f"pacr_mean_pos_score: {losses.get('pacr_mean_pos_score', 0.0):.3f} "
+                        f"pacr_mean_hardneg_score: {losses.get('pacr_mean_hardneg_score', 0.0):.3f} "
+                        f"pacr_violation_rate: {losses.get('pacr_violation_rate', 0.0):.3f}"
+                    )
+                if bool(getattr(self.config, "use_agml_loss", False)):
+                    msg += (
+                        f" agml_loss_mean: {losses.get('agml_loss_mean', 0.0):.3f} "
+                        f"agml_active_aspects: {int(losses.get('agml_active_aspects', 0))} "
+                        f"agml_mean_gold_mass: {losses.get('agml_mean_gold_mass', 0.0):.3f}"
+                    )
+                if bool(getattr(self.config, "use_agml_comp_loss", False)):
+                    msg += (
+                        f" agml_comp_loss_mean: {losses.get('agml_comp_loss_mean', 0.0):.3f} "
+                        f"agml_comp_active_aspects: {int(losses.get('agml_comp_active_aspects', 0))} "
+                        f"agml_comp_mean_pos_group: {losses.get('agml_comp_mean_pos_group', 0.0):.3f} "
+                        f"agml_comp_mean_neg_group: {losses.get('agml_comp_mean_neg_group', 0.0):.3f} "
+                        f"agml_comp_violation_rate: {losses.get('agml_comp_violation_rate', 0.0):.3f}"
+                    )
+                if bool(getattr(self.config, "use_agml_br_loss", False)):
+                    msg += (
+                        f" agml_br_loss_mean: {losses.get('agml_br_loss_mean', 0.0):.3f} "
+                        f"agml_br_active_gold_pairs: {int(losses.get('agml_br_active_gold_pairs', 0))} "
+                        f"agml_br_mean_boundary: {losses.get('agml_br_mean_boundary', 0.0):.3f} "
+                        f"agml_br_mean_gold_score: {losses.get('agml_br_mean_gold_score', 0.0):.3f} "
+                        f"agml_br_violation_rate: {losses.get('agml_br_violation_rate', 0.0):.3f}"
+                    )
+                if bool(getattr(self.config, "use_ma_aux", False)):
+                    msg += (
+                        f" ma_aux_loss_mean: {losses.get('ma_aux_loss_mean', 0.0):.3f} "
+                        f"ma_aux_active_pairs: {int(losses.get('ma_aux_active_pairs', 0))} "
+                        f"ma_aux_pos_pairs: {int(losses.get('ma_aux_pos_pairs', 0))} "
+                        f"ma_aux_neg_pairs: {int(losses.get('ma_aux_neg_pairs', 0))} "
+                        f"ma_aux_cat_loss_mean: {losses.get('ma_aux_cat_loss_mean', 0.0):.3f} "
+                        f"ma_aux_sent_loss_mean: {losses.get('ma_aux_sent_loss_mean', 0.0):.3f}"
+                    )
+                if (
+                    bool(getattr(self.config, "use_mbl_loss", False))
+                    or bool(getattr(self.config, "use_cat_mbl_loss", False))
+                    or bool(getattr(self.config, "use_sent_mbl_loss", False))
+                ):
+                    msg += (
+                        f" mbl_loss_mean: {losses.get('mbl_loss_mean', 0.0):.3f} "
+                        f"mbl_active_pairs: {int(losses.get('mbl_active_pairs', 0))} "
+                        f"mbl_cat_active_pairs: {int(losses.get('mbl_cat_active_pairs', 0))} "
+                        f"mbl_sent_active_pairs: {int(losses.get('mbl_sent_active_pairs', 0))} "
+                        f"mbl_cat_violation_rate: {losses.get('mbl_cat_violation_rate', 0.0):.3f} "
+                        f"mbl_sent_violation_rate: {losses.get('mbl_sent_violation_rate', 0.0):.3f} "
+                        f"mbl_cat_loss_mean: {losses.get('mbl_cat_loss_mean', 0.0):.3f} "
+                        f"mbl_sent_loss_mean: {losses.get('mbl_sent_loss_mean', 0.0):.3f}"
+                    )
+                print(msg)
 
         return total_loss / max(num_batches, 1)
 

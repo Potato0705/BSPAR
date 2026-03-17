@@ -22,11 +22,17 @@ class BSPARStage1Dataset(Dataset):
     """
 
     def __init__(self, examples: list[Example], tokenizer_name: str,
-                 max_length: int = 128, max_span_length: int = 8):
+                 max_length: int = 128, max_span_length: int = 8,
+                 allow_offline_tokenizer_fallback: bool = True):
         self.examples = examples
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-        except (OSError, Exception):
+        except (OSError, Exception) as exc:
+            if not allow_offline_tokenizer_fallback:
+                raise RuntimeError(
+                    "Tokenizer load failed and offline fallback is disabled. "
+                    f"tokenizer='{tokenizer_name}'"
+                ) from exc
             # Offline fallback: create a minimal word-level tokenizer
             from bspar.data._offline_tokenizer import OfflineTokenizer
             print(f"Warning: cannot load '{tokenizer_name}', "

@@ -183,7 +183,11 @@ def main():
     config.num_categories = len(categories)
 
     dev_examples = load_data(dev_file, data_format, categories)
-    dev_dataset = BSPARStage1Dataset(dev_examples, config.model_name)
+    dev_dataset = BSPARStage1Dataset(
+        dev_examples,
+        config.model_name,
+        allow_offline_tokenizer_fallback=False,
+    )
     dev_loader = DataLoader(
         dev_dataset,
         batch_size=config.batch_size,

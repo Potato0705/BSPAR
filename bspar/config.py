@@ -24,12 +24,29 @@ class BSPARConfig:
     width_embedding_dim: int = 32
     top_k_aspects: int = 20
     top_k_opinions: int = 20
+    opinion_span_topk_delta: int = 0
+    opinion_backfill_use_pair_floor_gate: bool = False
+    opinion_backfill_pair_floor: float = 0.0
+    opinion_backfill_use_aspect_uncovered_gate: bool = False
+    opinion_backfill_aspect_min_base_pairs: int = 1
+    opinion_backfill_use_marginal_gain_gate: bool = False
+    opinion_backfill_gain_margin: float = 0.0
+    opinion_backfill_max_delta_per_aspect: int = 1
+    opinion_backfill_use_aspect_displacement_gate: bool = False
+    opinion_backfill_displacement_margin: float = 0.0
+    opinion_backfill_max_replacements_per_aspect: int = 1
     span_score_threshold: float = 0.0
 
     # === Pair Module (Module B) ===
     dist_buckets: int = 16
     order_types: int = 3                # asp_first, opn_first, has_null
     top_c_categories: int = 3           # categories per pair for quad expansion
+    use_acr_refine: bool = False
+    use_acr_cat_refine: bool = False
+    use_acr_aff_refine: bool = False
+    acr_hidden_dim: int = 128
+    acr_apply_to: str = "cat_aff"
+    acr_use_layernorm: bool = True
 
     # === Quad Reranker (Module C) ===
     cat_embedding_dim: int = 32
@@ -54,6 +71,35 @@ class BSPARConfig:
     pair_focal_gamma: float = 1.0
     lambda_pair_rank: float = 0.0
     pair_rank_margin: float = 0.1
+    pair_rank_semantic_weight: float = 1.0
+    use_pacr_loss: bool = False
+    pacr_lambda: float = 0.3
+    pacr_margin: float = 0.1
+    pacr_same_aspect_only: bool = True
+    pacr_hardneg_topk: int = 1
+    use_agml_loss: bool = False
+    agml_lambda: float = 0.3
+    agml_tau: float = 1.0
+    agml_same_aspect_only: bool = True
+    use_agml_comp_loss: bool = False
+    agml_comp_lambda: float = 0.1
+    agml_comp_margin: float = 0.05
+    agml_comp_topk: int = 3
+    use_agml_br_loss: bool = False
+    agml_br_lambda: float = 0.1
+    agml_br_margin: float = 0.05
+    use_ma_aux: bool = False
+    ma_aux_lambda: float = 0.05
+    ma_aux_neg_source: str = "retained"
+    ma_aux_hardneg_topk: int = 20
+    use_mbl_loss: bool = False
+    mbl_lambda: float = 0.05
+    use_cat_mbl_loss: bool = False
+    use_sent_mbl_loss: bool = False
+    mbl_lambda_cat: float = 0.05
+    mbl_lambda_sent: float = 0.05
+    cat_mbl_margin: float = 0.05
+    sent_mbl_margin: float = 0.05
 
     # === Training ===
     encoder_lr: float = 2e-5
