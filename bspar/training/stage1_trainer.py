@@ -89,16 +89,30 @@ class Stage1Trainer:
     def train(self, output_dir: str):
         """Run full Stage-1 training with early stopping."""
         os.makedirs(output_dir, exist_ok=True)
+        train_aux_stats = {}
 
         for epoch in range(1, self.config.stage1_epochs + 1):
             # Compute scheduled gold injection probability
             gold_inj_prob = self._get_gold_injection_prob(epoch)
 
             # Train
-            train_loss = self._train_epoch(epoch, gold_inj_prob)
+            train_loss, train_aux_stats = self._train_epoch(epoch, gold_inj_prob)
 
             # Evaluate
             dev_metrics = self._evaluate()
+            if bool(getattr(self.config, "use_cbr_v1_loss", False)):
+                dev_metrics.update(
+                    {
+                        "boundary_active_positive_ratio": train_aux_stats.get(
+                            "boundary_active_positive_ratio", 0.0
+                        ),
+                        "avg_cutoff_gap": train_aux_stats.get("avg_cutoff_gap", 0.0),
+                        "num_samples_with_active_boundary_loss": train_aux_stats.get(
+                            "num_samples_with_active_boundary_loss", 0
+                        ),
+                        "cbr_loss_mean": train_aux_stats.get("cbr_loss_mean", 0.0),
+                    }
+                )
             dev_f1 = dev_metrics.get("quad_f1", 0.0)
             ckpt_score = self._checkpoint_selection_score(dev_metrics)
 
@@ -183,6 +197,11 @@ class Stage1Trainer:
         self.model.train()
         total_loss = 0.0
         num_batches = 0
+        cbr_sum_active_ratio = 0.0
+        cbr_sum_cutoff_gap = 0.0
+        cbr_sum_active_samples = 0.0
+        cbr_sum_loss = 0.0
+        cbr_count = 0
 
         for batch_idx, batch in enumerate(self.train_loader):
             input_ids = batch["input_ids"].to(self.device)
@@ -282,9 +301,37 @@ class Stage1Trainer:
                         f"mbl_cat_loss_mean: {losses.get('mbl_cat_loss_mean', 0.0):.3f} "
                         f"mbl_sent_loss_mean: {losses.get('mbl_sent_loss_mean', 0.0):.3f}"
                     )
+                if bool(getattr(self.config, "use_cbr_v1_loss", False)):
+                    msg += (
+                        f" cbr_loss_mean: {losses.get('cbr_loss_mean', 0.0):.3f} "
+                        f"boundary_active_positive_ratio: {losses.get('boundary_active_positive_ratio', 0.0):.3f} "
+                        f"avg_cutoff_gap: {losses.get('avg_cutoff_gap', 0.0):.3f} "
+                        f"num_samples_with_active_boundary_loss: "
+                        f"{int(losses.get('num_samples_with_active_boundary_loss', 0))}"
+                    )
                 print(msg)
 
-        return total_loss / max(num_batches, 1)
+            if bool(getattr(self.config, "use_cbr_v1_loss", False)):
+                cbr_sum_active_ratio += float(
+                    losses.get("boundary_active_positive_ratio", 0.0)
+                )
+                cbr_sum_cutoff_gap += float(losses.get("avg_cutoff_gap", 0.0))
+                cbr_sum_active_samples += float(
+                    losses.get("num_samples_with_active_boundary_loss", 0.0)
+                )
+                cbr_sum_loss += float(losses.get("cbr_loss_mean", 0.0))
+                cbr_count += 1
+
+        train_aux = {}
+        if bool(getattr(self.config, "use_cbr_v1_loss", False)) and cbr_count > 0:
+            train_aux = {
+                "boundary_active_positive_ratio": cbr_sum_active_ratio / cbr_count,
+                "avg_cutoff_gap": cbr_sum_cutoff_gap / cbr_count,
+                "num_samples_with_active_boundary_loss": cbr_sum_active_samples / cbr_count,
+                "cbr_loss_mean": cbr_sum_loss / cbr_count,
+            }
+
+        return total_loss / max(num_batches, 1), train_aux
 
     @torch.no_grad()
     def _evaluate(self):

@@ -47,6 +47,11 @@ class BSPARConfig:
     acr_hidden_dim: int = 128
     acr_apply_to: str = "cat_aff"
     acr_use_layernorm: bool = True
+    use_early_interaction_prior: bool = False
+    early_interaction_scale: float = 0.5
+    early_interaction_cat_weight: float = 0.5
+    early_interaction_aff_weight: float = 0.5
+    early_interaction_detach: bool = True
 
     # === Quad Reranker (Module C) ===
     cat_embedding_dim: int = 32
@@ -88,6 +93,11 @@ class BSPARConfig:
     use_agml_br_loss: bool = False
     agml_br_lambda: float = 0.1
     agml_br_margin: float = 0.05
+    use_cbr_v1_loss: bool = False
+    cbr_v1_lambda: float = 0.1
+    cbr_v1_margin: float = 0.03
+    cbr_v1_buffer: int = 3
+    cbr_v1_detach_cutoff: bool = True
     use_ma_aux: bool = False
     ma_aux_lambda: float = 0.05
     ma_aux_neg_source: str = "retained"

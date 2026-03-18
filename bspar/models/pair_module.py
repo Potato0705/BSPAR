@@ -19,7 +19,12 @@ class PairModule(nn.Module):
                  use_acr_aff_refine: bool = False,
                  acr_hidden_dim: int = 128,
                  acr_apply_to: str = "cat_aff",
-                 acr_use_layernorm: bool = True):
+                 acr_use_layernorm: bool = True,
+                 use_early_interaction_prior: bool = False,
+                 early_interaction_scale: float = 0.5,
+                 early_interaction_cat_weight: float = 0.5,
+                 early_interaction_aff_weight: float = 0.5,
+                 early_interaction_detach: bool = True):
         super().__init__()
         self.task_type = task_type
         self.num_categories = num_categories
@@ -33,6 +38,11 @@ class PairModule(nn.Module):
         self.use_acr_aff_refine = bool(use_acr_aff_refine)
         self.use_acr_refine = self.use_acr_cat_refine or self.use_acr_aff_refine
         self.acr_apply_to = acr_apply_to
+        self.use_early_interaction_prior = bool(use_early_interaction_prior)
+        self.early_interaction_scale = float(early_interaction_scale)
+        self.early_interaction_cat_weight = float(early_interaction_cat_weight)
+        self.early_interaction_aff_weight = float(early_interaction_aff_weight)
+        self.early_interaction_detach = bool(early_interaction_detach)
 
         # Structural feature embeddings
         self.dist_embedding = nn.Embedding(dist_buckets, 32)
@@ -110,8 +120,8 @@ class PairModule(nn.Module):
 
         pair_reprs = self.pair_proj(pair_input)
 
-        # Keep pair scoring on original pair representations.
-        pair_scores = self.pair_scorer(pair_reprs).squeeze(-1)
+        # Keep base pair scoring on original pair representations.
+        pair_scores_base = self.pair_scorer(pair_reprs).squeeze(-1)
 
         # Optional aspect-conditioned refinement for materialization heads only.
         cat_aff_reprs = pair_reprs
@@ -126,9 +136,36 @@ class PairModule(nn.Module):
         cat_logits = self.cat_head(cat_input)
         aff_output = self.aff_head(aff_input)
 
+        pair_scores = pair_scores_base
+        early_prior = torch.zeros_like(pair_scores_base)
+        if self.use_early_interaction_prior:
+            # Early compatibility prior from cat/aff confidence margins.
+            # This moves interaction signal into pre-retention pair ranking.
+            cat_top2 = torch.topk(cat_logits, k=min(2, cat_logits.size(-1)), dim=-1).values
+            cat_margin = cat_top2[..., 0] - (
+                cat_top2[..., 1] if cat_top2.size(-1) > 1 else 0.0
+            )
+            cat_signal = torch.tanh(cat_margin)
+
+            aff_top2 = torch.topk(aff_output, k=min(2, aff_output.size(-1)), dim=-1).values
+            aff_margin = aff_top2[..., 0] - (
+                aff_top2[..., 1] if aff_top2.size(-1) > 1 else 0.0
+            )
+            aff_signal = torch.tanh(aff_margin)
+
+            early_prior = (
+                self.early_interaction_cat_weight * cat_signal +
+                self.early_interaction_aff_weight * aff_signal
+            )
+            if self.early_interaction_detach:
+                early_prior = early_prior.detach()
+            pair_scores = pair_scores_base + self.early_interaction_scale * early_prior
+
         return {
             "pair_reprs": pair_reprs,
             "pair_scores": pair_scores,
+            "pair_scores_base": pair_scores_base,
+            "early_interaction_prior": early_prior,
             "cat_logits": cat_logits,
             "aff_output": aff_output,
         }

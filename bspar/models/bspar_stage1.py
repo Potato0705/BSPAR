@@ -42,6 +42,19 @@ class BSPARStage1(nn.Module):
             acr_hidden_dim=getattr(config, "acr_hidden_dim", 128),
             acr_apply_to=getattr(config, "acr_apply_to", "cat_aff"),
             acr_use_layernorm=getattr(config, "acr_use_layernorm", True),
+            use_early_interaction_prior=getattr(
+                config, "use_early_interaction_prior", False
+            ),
+            early_interaction_scale=getattr(config, "early_interaction_scale", 0.5),
+            early_interaction_cat_weight=getattr(
+                config, "early_interaction_cat_weight", 0.5
+            ),
+            early_interaction_aff_weight=getattr(
+                config, "early_interaction_aff_weight", 0.5
+            ),
+            early_interaction_detach=getattr(
+                config, "early_interaction_detach", True
+            ),
         )
         # Materialization-aware auxiliary heads (training-only).
         # They read pair representations but do not affect inference decoding.
@@ -1190,6 +1203,96 @@ class BSPARStage1(nn.Module):
         }
         return total_loss, br_stats
 
+    def _compute_cbr_v1_loss(
+        self,
+        pair_scores,
+        pair_labels,
+        pair_valid_mask=None,
+    ):
+        """CBR-v1: cutoff-aware boundary ranking loss on top-N retention boundary.
+
+        Uses the same candidate universe and sorting path as topn_only retention:
+        - valid candidate ids from pair_valid_mask
+        - final pair scores from current pair_scores tensor (after sigmoid)
+        - descending sort over valid candidates
+        """
+        cfg = self.config
+        K = max(int(getattr(cfg, "stage1_pair_top_n", 20)), 1)
+        b = max(int(getattr(cfg, "cbr_v1_buffer", 3)), 1)
+        margin = float(getattr(cfg, "cbr_v1_margin", 0.03))
+        detach_cutoff = bool(getattr(cfg, "cbr_v1_detach_cutoff", True))
+
+        pair_probs = torch.sigmoid(pair_scores)
+        total_loss = pair_scores.sum() * 0.0
+        active_samples = 0
+        active_positive_pairs = 0
+        total_positive_pairs = 0
+        cutoff_gap_sum = 0.0
+
+        for b_idx in range(pair_scores.size(0)):
+            valid_mask = (
+                pair_valid_mask[b_idx].bool()
+                if pair_valid_mask is not None
+                else torch.ones_like(pair_labels[b_idx], dtype=torch.bool)
+            )
+            valid_ids = torch.where(valid_mask)[0]
+            if valid_ids.numel() == 0:
+                continue
+
+            pos_ids = torch.where((pair_labels[b_idx] == 1.0) & valid_mask)[0]
+            neg_ids = torch.where((pair_labels[b_idx] == 0.0) & valid_mask)[0]
+            if pos_ids.numel() == 0 or neg_ids.numel() == 0:
+                continue
+
+            total_positive_pairs += int(pos_ids.numel())
+            g_x = int(pos_ids.numel())
+            n_x = int(neg_ids.numel())
+            k_eff = max(1, min(n_x, K - min(g_x - 1, K - 1)))
+
+            neg_scores = pair_probs[b_idx, neg_ids]
+            tau_x = torch.topk(neg_scores, k=k_eff, largest=True).values[-1]
+            tau_for_loss = tau_x.detach() if detach_cutoff else tau_x
+
+            # Same ranking path as retention: sort valid candidates by final pair score.
+            valid_scores = pair_probs[b_idx, valid_ids]
+            sorted_valid = valid_ids[torch.argsort(valid_scores, descending=True)]
+            rank_map = {int(pid): ridx + 1 for ridx, pid in enumerate(sorted_valid.tolist())}
+
+            sample_terms = []
+            for pid in pos_ids.tolist():
+                s_p = pair_probs[b_idx, pid]
+                rank_p = rank_map.get(int(pid), K + 1)
+                in_boundary_band = rank_p > (K - b)
+                below_cutoff_band = bool((s_p < (tau_x + margin)).item())
+                if not (in_boundary_band or below_cutoff_band):
+                    continue
+
+                term = torch.clamp(margin + tau_for_loss - s_p, min=0.0)
+                sample_terms.append(term)
+                active_positive_pairs += 1
+                cutoff_gap_sum += float((tau_for_loss - s_p.detach()).item())
+
+            if sample_terms:
+                total_loss = total_loss + torch.stack(sample_terms).mean()
+                active_samples += 1
+
+        if active_samples > 0:
+            total_loss = total_loss / active_samples
+
+        cbr_stats = {
+            "num_samples_with_active_boundary_loss": int(active_samples),
+            "boundary_active_positive_ratio": (
+                active_positive_pairs / total_positive_pairs
+                if total_positive_pairs > 0 else 0.0
+            ),
+            "avg_cutoff_gap": (
+                cutoff_gap_sum / active_positive_pairs
+                if active_positive_pairs > 0 else 0.0
+            ),
+            "loss_mean": float(total_loss.detach().item()) if active_samples > 0 else 0.0,
+        }
+        return total_loss, cbr_stats
+
     def _compute_ma_aux_loss(
         self,
         pair_reprs,
@@ -1671,6 +1774,7 @@ class BSPARStage1(nn.Module):
         agml_enabled = bool(getattr(cfg, "use_agml_loss", False))
         agml_comp_enabled = bool(getattr(cfg, "use_agml_comp_loss", False))
         agml_br_enabled = bool(getattr(cfg, "use_agml_br_loss", False))
+        cbr_enabled = bool(getattr(cfg, "use_cbr_v1_loss", False))
         ma_enabled = bool(getattr(cfg, "use_ma_aux", False))
         mbl_legacy_enabled = bool(getattr(cfg, "use_mbl_loss", False))
         cat_mbl_enabled = (
@@ -1739,6 +1843,20 @@ class BSPARStage1(nn.Module):
                 "mean_boundary": 0.0,
                 "mean_gold_score": 0.0,
                 "violation_rate": 0.0,
+                "loss_mean": 0.0,
+            }
+        if cbr_enabled:
+            loss_cbr, cbr_stats = self._compute_cbr_v1_loss(
+                pair_scores=pair_out["pair_scores"],
+                pair_labels=pair_labels,
+                pair_valid_mask=pair_valid_mask,
+            )
+        else:
+            loss_cbr = torch.tensor(0.0, device=device)
+            cbr_stats = {
+                "num_samples_with_active_boundary_loss": 0,
+                "boundary_active_positive_ratio": 0.0,
+                "avg_cutoff_gap": 0.0,
                 "loss_mean": 0.0,
             }
         if mbl_enabled:
@@ -1824,6 +1942,7 @@ class BSPARStage1(nn.Module):
             (cfg.agml_lambda * loss_agml if agml_enabled else 0.0) +
             (cfg.agml_comp_lambda * loss_agml_comp if agml_comp_enabled else 0.0) +
             (cfg.agml_br_lambda * loss_agml_br if agml_br_enabled else 0.0) +
+            (cfg.cbr_v1_lambda * loss_cbr if cbr_enabled else 0.0) +
             (loss_mbl if mbl_enabled else 0.0) +
             (cfg.ma_aux_lambda * loss_ma_aux if ma_enabled else 0.0) +
             cfg.lambda_cat * loss_cat +
@@ -1839,6 +1958,7 @@ class BSPARStage1(nn.Module):
             "loss_agml": loss_agml.detach(),
             "loss_agml_comp": loss_agml_comp.detach(),
             "loss_agml_br": loss_agml_br.detach(),
+            "loss_cbr": loss_cbr.detach(),
             "loss_cat_mbl": loss_cat_mbl.detach(),
             "loss_sent_mbl": loss_sent_mbl.detach(),
             "loss_mbl": loss_mbl.detach(),
@@ -1875,6 +1995,17 @@ class BSPARStage1(nn.Module):
                 "agml_br_mean_gold_score": agml_br_stats["mean_gold_score"],
                 "agml_br_violation_rate": agml_br_stats["violation_rate"],
                 "agml_br_loss_mean": agml_br_stats["loss_mean"],
+            })
+        if cbr_enabled:
+            out.update({
+                "num_samples_with_active_boundary_loss": (
+                    cbr_stats["num_samples_with_active_boundary_loss"]
+                ),
+                "boundary_active_positive_ratio": (
+                    cbr_stats["boundary_active_positive_ratio"]
+                ),
+                "avg_cutoff_gap": cbr_stats["avg_cutoff_gap"],
+                "cbr_loss_mean": cbr_stats["loss_mean"],
             })
         if mbl_enabled:
             out.update({
