@@ -110,6 +110,19 @@ class BSPARConfig:
     mbl_lambda_sent: float = 0.05
     cat_mbl_margin: float = 0.05
     sent_mbl_margin: float = 0.05
+    use_romr_v1_loss: bool = False
+    romr_v1_lambda: float = 0.05
+    romr_v1_margin: float = 0.05
+    romr_v1_detach_selection: bool = True
+    use_homr_v1_loss: bool = False
+    homr_v1_lambda: float = 0.05
+    homr_v1_margin: float = 0.05
+    homr_v1_detach_selection: bool = True
+    use_rph_v1_loss: bool = False
+    rph_v1_lambda: float = 0.05
+    rph_v1_detach_selection: bool = True
+    use_rph_v1_decode_reweight: bool = False
+    rph_v1_decode_alpha: float = 0.10
 
     # === Training ===
     encoder_lr: float = 2e-5

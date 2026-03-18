@@ -1541,6 +1541,354 @@ class BSPARStage1(nn.Module):
         }
         return cat_loss_mean, sent_loss_mean, stats
 
+    def _compute_romr_v1_loss(
+        self,
+        cat_logits,
+        aff_logits,
+        pair_scores,
+        pair_labels,
+        pair_map,
+        ma_cat_targets,
+        ma_sent_targets=None,
+        pair_valid_mask=None,
+    ):
+        """Retained-only same-aspect materialization auxiliary (ROMR-v1).
+
+        Build retained set from the exact top-N retention path (topn_only, valid mask,
+        sigmoid(pair_scores) ranking), then within retained pairs form same-aspect groups.
+        For each group with retained gold and retained non-gold pairs, rank gold
+        materialization confidence above hardest retained non-gold confidence.
+        """
+        cfg = self.config
+        top_n = max(int(getattr(cfg, "stage1_pair_top_n", 20)), 1)
+        margin = float(getattr(cfg, "romr_v1_margin", 0.05))
+        detach_selection = bool(getattr(cfg, "romr_v1_detach_selection", True))
+
+        rank_scores = torch.sigmoid(pair_scores.detach() if detach_selection else pair_scores)
+        total_loss = pair_scores.sum() * 0.0
+        active_aspects = 0
+        active_pairs = 0
+        violation_pairs = 0
+        pos_score_sum = 0.0
+        neg_score_sum = 0.0
+
+        has_aff = (
+            aff_logits is not None and
+            ma_sent_targets is not None and
+            self.config.task_type == "asqp"
+        )
+
+        for b in range(pair_scores.size(0)):
+            valid_mask = (
+                pair_valid_mask[b].bool()
+                if pair_valid_mask is not None
+                else torch.ones_like(pair_labels[b], dtype=torch.bool)
+            )
+            valid_ids = torch.where(valid_mask)[0].tolist()
+            if not valid_ids:
+                continue
+
+            ranked_valid = sorted(
+                valid_ids,
+                key=lambda pid: float(rank_scores[b, pid].item()),
+                reverse=True,
+            )
+            retained_ids = ranked_valid[:top_n]
+            if not retained_ids:
+                continue
+
+            grouped = {}
+            for pid in retained_ids:
+                asp_idx, _ = pair_map[pid]
+                grouped.setdefault(int(asp_idx), []).append(int(pid))
+
+            for _, group_ids in grouped.items():
+                pos_ids = [pid for pid in group_ids if pair_labels[b, pid].item() == 1.0]
+                neg_ids = [pid for pid in group_ids if pair_labels[b, pid].item() == 0.0]
+                if not pos_ids or not neg_ids:
+                    continue
+
+                neg_scores = []
+                for pid in neg_ids:
+                    cat_conf = cat_logits[b, pid].max()
+                    if has_aff:
+                        aff_conf = aff_logits[b, pid].max()
+                        neg_scores.append(cat_conf + aff_conf)
+                    else:
+                        neg_scores.append(cat_conf)
+                if not neg_scores:
+                    continue
+                hard_neg = torch.stack(neg_scores).max()
+
+                terms = []
+                for pid in pos_ids:
+                    gold_cat_mask = ma_cat_targets[b, pid] > 0.5
+                    if not gold_cat_mask.any():
+                        continue
+                    pos_cat = cat_logits[b, pid][gold_cat_mask].mean()
+
+                    if has_aff:
+                        gold_sent_mask = ma_sent_targets[b, pid] > 0.5
+                        if gold_sent_mask.any():
+                            pos_aff = aff_logits[b, pid][gold_sent_mask].mean()
+                        else:
+                            pos_aff = aff_logits[b, pid].max()
+                        pos_score = pos_cat + pos_aff
+                    else:
+                        pos_score = pos_cat
+
+                    term = torch.clamp(margin + hard_neg - pos_score, min=0.0)
+                    terms.append(term)
+                    active_pairs += 1
+                    pos_score_sum += float(pos_score.detach().item())
+                    neg_score_sum += float(hard_neg.detach().item())
+                    if float(term.detach().item()) > 0.0:
+                        violation_pairs += 1
+
+                if terms:
+                    total_loss = total_loss + torch.stack(terms).mean()
+                    active_aspects += 1
+
+        if active_aspects > 0:
+            total_loss = total_loss / active_aspects
+
+        stats = {
+            "active_aspects": int(active_aspects),
+            "active_pairs": int(active_pairs),
+            "mean_pos_score": (
+                pos_score_sum / active_pairs if active_pairs > 0 else 0.0
+            ),
+            "mean_hardneg_score": (
+                neg_score_sum / active_pairs if active_pairs > 0 else 0.0
+            ),
+            "violation_rate": (
+                violation_pairs / active_pairs if active_pairs > 0 else 0.0
+            ),
+            "loss_mean": float(total_loss.detach().item()) if active_aspects > 0 else 0.0,
+        }
+        return total_loss, stats
+
+    def _compute_homr_v1_loss(
+        self,
+        pair_reprs,
+        pair_scores,
+        pair_labels,
+        pair_map,
+        ma_cat_targets,
+        ma_sent_targets=None,
+        pair_valid_mask=None,
+    ):
+        """Head-Only Materialization Refinement (HOMR-v1).
+
+        Uses retained top-N pairs from the real retention path, but computes
+        materialization ranking on detached pair representations so this branch
+        updates head parameters only and does not backprop into pair-ranking trunk.
+        """
+        cfg = self.config
+        top_n = max(int(getattr(cfg, "stage1_pair_top_n", 20)), 1)
+        margin = float(getattr(cfg, "homr_v1_margin", 0.05))
+        detach_selection = bool(getattr(cfg, "homr_v1_detach_selection", True))
+
+        rank_scores = torch.sigmoid(pair_scores.detach() if detach_selection else pair_scores)
+
+        # Head-only path: detach shared pair representations so gradients from HOMR
+        # do not flow back into pair representation / pair scoring trunk.
+        homr_reprs = pair_reprs.detach()
+        cat_logits_h = self.pair_module.cat_head(homr_reprs)
+        aff_logits_h = (
+            self.pair_module.aff_head(homr_reprs)
+            if self.config.task_type == "asqp"
+            else None
+        )
+
+        total_loss = pair_scores.sum() * 0.0
+        active_aspects = 0
+        active_pairs = 0
+        violation_pairs = 0
+        pos_score_sum = 0.0
+        neg_score_sum = 0.0
+        top_c = max(int(getattr(cfg, "top_c_categories", 3)), 1)
+
+        has_aff = (
+            aff_logits_h is not None and
+            ma_sent_targets is not None and
+            self.config.task_type == "asqp"
+        )
+
+        for b in range(pair_scores.size(0)):
+            valid_mask = (
+                pair_valid_mask[b].bool()
+                if pair_valid_mask is not None
+                else torch.ones_like(pair_labels[b], dtype=torch.bool)
+            )
+            valid_ids = torch.where(valid_mask)[0].tolist()
+            if not valid_ids:
+                continue
+
+            ranked_valid = sorted(
+                valid_ids,
+                key=lambda pid: float(rank_scores[b, pid].item()),
+                reverse=True,
+            )
+            retained_ids = ranked_valid[:top_n]
+            if not retained_ids:
+                continue
+
+            grouped = {}
+            for pid in retained_ids:
+                asp_idx, _ = pair_map[pid]
+                grouped.setdefault(int(asp_idx), []).append(int(pid))
+
+            for _, group_ids in grouped.items():
+                pos_ids = [pid for pid in group_ids if pair_labels[b, pid].item() == 1.0]
+                neg_ids = [pid for pid in group_ids if pair_labels[b, pid].item() == 0.0]
+                if not pos_ids or not neg_ids:
+                    continue
+
+                neg_scores = []
+                for pid in neg_ids:
+                    cat_vals = torch.topk(
+                        cat_logits_h[b, pid],
+                        k=min(top_c, cat_logits_h.size(-1)),
+                        largest=True,
+                    ).values
+                    neg_cat = cat_vals.mean()
+                    if has_aff:
+                        neg_aff = aff_logits_h[b, pid].max()
+                        neg_scores.append(neg_cat + neg_aff)
+                    else:
+                        neg_scores.append(neg_cat)
+                if not neg_scores:
+                    continue
+                hard_neg = torch.stack(neg_scores).max()
+
+                terms = []
+                for pid in pos_ids:
+                    gold_cat_mask = ma_cat_targets[b, pid] > 0.5
+                    if not gold_cat_mask.any():
+                        continue
+                    pos_cat = cat_logits_h[b, pid][gold_cat_mask].mean()
+                    if has_aff:
+                        gold_sent_mask = ma_sent_targets[b, pid] > 0.5
+                        if gold_sent_mask.any():
+                            pos_aff = aff_logits_h[b, pid][gold_sent_mask].mean()
+                        else:
+                            pos_aff = aff_logits_h[b, pid].max()
+                        pos_score = pos_cat + pos_aff
+                    else:
+                        pos_score = pos_cat
+
+                    term = torch.clamp(margin + hard_neg - pos_score, min=0.0)
+                    terms.append(term)
+                    active_pairs += 1
+                    pos_score_sum += float(pos_score.detach().item())
+                    neg_score_sum += float(hard_neg.detach().item())
+                    if float(term.detach().item()) > 0.0:
+                        violation_pairs += 1
+
+                if terms:
+                    total_loss = total_loss + torch.stack(terms).mean()
+                    active_aspects += 1
+
+        if active_aspects > 0:
+            total_loss = total_loss / active_aspects
+
+        stats = {
+            "active_aspects": int(active_aspects),
+            "active_pairs": int(active_pairs),
+            "mean_pos_score": (
+                pos_score_sum / active_pairs if active_pairs > 0 else 0.0
+            ),
+            "mean_hardneg_score": (
+                neg_score_sum / active_pairs if active_pairs > 0 else 0.0
+            ),
+            "violation_rate": (
+                violation_pairs / active_pairs if active_pairs > 0 else 0.0
+            ),
+            "loss_mean": float(total_loss.detach().item()) if active_aspects > 0 else 0.0,
+        }
+        return total_loss, stats
+
+    def _compute_rph_v1_loss(
+        self,
+        pair_reprs,
+        pair_scores,
+        pair_labels,
+        pair_valid_mask=None,
+    ):
+        """Retained Probe Head (RPH-v1) on detached retained pair representations.
+
+        - Retained set is built from the real retention path:
+          pair_valid_mask + sigmoid(pair_scores) ranking + top_n.
+        - Probe reads pair_reprs.detach(), so gradients do not flow back into
+          pair ranking trunk.
+        """
+        cfg = self.config
+        top_n = max(int(getattr(cfg, "stage1_pair_top_n", 20)), 1)
+        detach_selection = bool(getattr(cfg, "rph_v1_detach_selection", True))
+
+        rank_scores = torch.sigmoid(
+            pair_scores.detach() if detach_selection else pair_scores
+        )
+        probe_logits = self.pair_module.rph_probe_head(pair_reprs.detach()).squeeze(-1)
+
+        total_loss = pair_scores.sum() * 0.0
+        active_samples = 0
+        active_pairs = 0
+        pos_pairs = 0
+        neg_pairs = 0
+        pos_prob_sum = 0.0
+        neg_prob_sum = 0.0
+
+        for b in range(pair_scores.size(0)):
+            valid_mask = (
+                pair_valid_mask[b].bool()
+                if pair_valid_mask is not None
+                else torch.ones_like(pair_labels[b], dtype=torch.bool)
+            )
+            valid_ids = torch.where(valid_mask)[0].tolist()
+            if not valid_ids:
+                continue
+
+            ranked_valid = sorted(
+                valid_ids,
+                key=lambda pid: float(rank_scores[b, pid].item()),
+                reverse=True,
+            )
+            retained_ids = ranked_valid[:top_n]
+            if not retained_ids:
+                continue
+
+            logits_b = probe_logits[b, retained_ids]
+            targets_b = pair_labels[b, retained_ids]
+            loss_b = F.binary_cross_entropy_with_logits(logits_b, targets_b)
+            total_loss = total_loss + loss_b
+            active_samples += 1
+            active_pairs += len(retained_ids)
+
+            probs_b = torch.sigmoid(logits_b.detach())
+            pos_mask = targets_b > 0.5
+            neg_mask = ~pos_mask
+            if pos_mask.any():
+                pos_pairs += int(pos_mask.sum().item())
+                pos_prob_sum += float(probs_b[pos_mask].sum().item())
+            if neg_mask.any():
+                neg_pairs += int(neg_mask.sum().item())
+                neg_prob_sum += float(probs_b[neg_mask].sum().item())
+
+        if active_samples > 0:
+            total_loss = total_loss / active_samples
+
+        stats = {
+            "active_pairs": int(active_pairs),
+            "pos_pairs": int(pos_pairs),
+            "neg_pairs": int(neg_pairs),
+            "mean_pos_prob": (pos_prob_sum / pos_pairs if pos_pairs > 0 else 0.0),
+            "mean_neg_prob": (neg_prob_sum / neg_pairs if neg_pairs > 0 else 0.0),
+            "loss_mean": float(total_loss.detach().item()) if active_samples > 0 else 0.0,
+        }
+        return total_loss, stats
+
     def _compute_stage1_losses(self, proposal_out, pair_out, pruned, pair_map,
                                 gold_quads, cat_to_id, word_to_subword,
                                 pair_valid_mask=None):
@@ -1775,6 +2123,9 @@ class BSPARStage1(nn.Module):
         agml_comp_enabled = bool(getattr(cfg, "use_agml_comp_loss", False))
         agml_br_enabled = bool(getattr(cfg, "use_agml_br_loss", False))
         cbr_enabled = bool(getattr(cfg, "use_cbr_v1_loss", False))
+        romr_enabled = bool(getattr(cfg, "use_romr_v1_loss", False))
+        homr_enabled = bool(getattr(cfg, "use_homr_v1_loss", False))
+        rph_enabled = bool(getattr(cfg, "use_rph_v1_loss", False))
         ma_enabled = bool(getattr(cfg, "use_ma_aux", False))
         mbl_legacy_enabled = bool(getattr(cfg, "use_mbl_loss", False))
         cat_mbl_enabled = (
@@ -1857,6 +2208,64 @@ class BSPARStage1(nn.Module):
                 "num_samples_with_active_boundary_loss": 0,
                 "boundary_active_positive_ratio": 0.0,
                 "avg_cutoff_gap": 0.0,
+                "loss_mean": 0.0,
+            }
+        if romr_enabled:
+            loss_romr, romr_stats = self._compute_romr_v1_loss(
+                cat_logits=pair_out["cat_logits"],
+                aff_logits=pair_out["aff_output"],
+                pair_scores=pair_out["pair_scores"],
+                pair_labels=pair_labels,
+                pair_map=pair_map,
+                ma_cat_targets=ma_cat_targets,
+                ma_sent_targets=ma_sent_targets,
+                pair_valid_mask=pair_valid_mask,
+            )
+        else:
+            loss_romr = torch.tensor(0.0, device=device)
+            romr_stats = {
+                "active_aspects": 0,
+                "active_pairs": 0,
+                "mean_pos_score": 0.0,
+                "mean_hardneg_score": 0.0,
+                "violation_rate": 0.0,
+                "loss_mean": 0.0,
+            }
+        if homr_enabled:
+            loss_homr, homr_stats = self._compute_homr_v1_loss(
+                pair_reprs=pair_out["pair_reprs"],
+                pair_scores=pair_out["pair_scores"],
+                pair_labels=pair_labels,
+                pair_map=pair_map,
+                ma_cat_targets=ma_cat_targets,
+                ma_sent_targets=ma_sent_targets,
+                pair_valid_mask=pair_valid_mask,
+            )
+        else:
+            loss_homr = torch.tensor(0.0, device=device)
+            homr_stats = {
+                "active_aspects": 0,
+                "active_pairs": 0,
+                "mean_pos_score": 0.0,
+                "mean_hardneg_score": 0.0,
+                "violation_rate": 0.0,
+                "loss_mean": 0.0,
+            }
+        if rph_enabled:
+            loss_rph, rph_stats = self._compute_rph_v1_loss(
+                pair_reprs=pair_out["pair_reprs"],
+                pair_scores=pair_out["pair_scores"],
+                pair_labels=pair_labels,
+                pair_valid_mask=pair_valid_mask,
+            )
+        else:
+            loss_rph = torch.tensor(0.0, device=device)
+            rph_stats = {
+                "active_pairs": 0,
+                "pos_pairs": 0,
+                "neg_pairs": 0,
+                "mean_pos_prob": 0.0,
+                "mean_neg_prob": 0.0,
                 "loss_mean": 0.0,
             }
         if mbl_enabled:
@@ -1943,6 +2352,9 @@ class BSPARStage1(nn.Module):
             (cfg.agml_comp_lambda * loss_agml_comp if agml_comp_enabled else 0.0) +
             (cfg.agml_br_lambda * loss_agml_br if agml_br_enabled else 0.0) +
             (cfg.cbr_v1_lambda * loss_cbr if cbr_enabled else 0.0) +
+            (cfg.romr_v1_lambda * loss_romr if romr_enabled else 0.0) +
+            (cfg.homr_v1_lambda * loss_homr if homr_enabled else 0.0) +
+            (cfg.rph_v1_lambda * loss_rph if rph_enabled else 0.0) +
             (loss_mbl if mbl_enabled else 0.0) +
             (cfg.ma_aux_lambda * loss_ma_aux if ma_enabled else 0.0) +
             cfg.lambda_cat * loss_cat +
@@ -1959,6 +2371,9 @@ class BSPARStage1(nn.Module):
             "loss_agml_comp": loss_agml_comp.detach(),
             "loss_agml_br": loss_agml_br.detach(),
             "loss_cbr": loss_cbr.detach(),
+            "loss_romr": loss_romr.detach(),
+            "loss_homr": loss_homr.detach(),
+            "loss_rph": loss_rph.detach(),
             "loss_cat_mbl": loss_cat_mbl.detach(),
             "loss_sent_mbl": loss_sent_mbl.detach(),
             "loss_mbl": loss_mbl.detach(),
@@ -2006,6 +2421,33 @@ class BSPARStage1(nn.Module):
                 ),
                 "avg_cutoff_gap": cbr_stats["avg_cutoff_gap"],
                 "cbr_loss_mean": cbr_stats["loss_mean"],
+            })
+        if romr_enabled:
+            out.update({
+                "romr_active_aspects": romr_stats["active_aspects"],
+                "romr_active_pairs": romr_stats["active_pairs"],
+                "romr_mean_pos_score": romr_stats["mean_pos_score"],
+                "romr_mean_hardneg_score": romr_stats["mean_hardneg_score"],
+                "romr_violation_rate": romr_stats["violation_rate"],
+                "romr_loss_mean": romr_stats["loss_mean"],
+            })
+        if homr_enabled:
+            out.update({
+                "homr_active_aspects": homr_stats["active_aspects"],
+                "homr_active_pairs": homr_stats["active_pairs"],
+                "homr_mean_pos_score": homr_stats["mean_pos_score"],
+                "homr_mean_hardneg_score": homr_stats["mean_hardneg_score"],
+                "homr_violation_rate": homr_stats["violation_rate"],
+                "homr_loss_mean": homr_stats["loss_mean"],
+            })
+        if rph_enabled:
+            out.update({
+                "rph_active_pairs": rph_stats["active_pairs"],
+                "rph_pos_pairs": rph_stats["pos_pairs"],
+                "rph_neg_pairs": rph_stats["neg_pairs"],
+                "rph_mean_pos_prob": rph_stats["mean_pos_prob"],
+                "rph_mean_neg_prob": rph_stats["mean_neg_prob"],
+                "rph_loss_mean": rph_stats["loss_mean"],
             })
         if mbl_enabled:
             out.update({
@@ -2106,10 +2548,34 @@ class BSPARStage1(nn.Module):
             )
             selected_pair_ids_per_example.append(selected_pair_ids)
 
+            # RPH-v1 decode-time local reweight:
+            # keep retained set fixed, only reorder/reweight within retained pairs.
+            selected_for_materialize = list(selected_pair_ids)
+            pair_score_for_decode = {int(pid): float(pair_scores[pid]) for pid in selected_pair_ids}
+            rph_probe_prob = {int(pid): 0.5 for pid in selected_pair_ids}
+            use_rph_decode = bool(getattr(self.config, "use_rph_v1_decode_reweight", False))
+            if use_rph_decode and len(selected_pair_ids) > 0:
+                alpha = float(getattr(self.config, "rph_v1_decode_alpha", 0.10))
+                with torch.no_grad():
+                    retained_reprs = pair_out["pair_reprs"][b, selected_pair_ids].detach()
+                    retained_logits = self.pair_module.rph_probe_head(retained_reprs).squeeze(-1)
+                    retained_probs = torch.sigmoid(retained_logits).cpu().tolist()
+                for pid, prob in zip(selected_pair_ids, retained_probs):
+                    pid = int(pid)
+                    rph_probe_prob[pid] = float(prob)
+                    pair_score_for_decode[pid] = float(pair_scores[pid] + alpha * (prob - 0.5))
+                selected_for_materialize = sorted(
+                    selected_for_materialize,
+                    key=lambda pid: pair_score_for_decode[int(pid)],
+                    reverse=True,
+                )
+
             example_cands = []
-            for p in selected_pair_ids:
+            for p in selected_for_materialize:
                 ai, oi = pair_map[p]
-                pair_score = pair_scores[p]
+                pair_score_base = float(pair_scores[p])
+                pair_score = float(pair_score_for_decode.get(int(p), pair_score_base))
+                probe_prob = float(rph_probe_prob.get(int(p), 0.5))
                 a_span_sub = asp_indices[ai]
                 o_span_sub = opn_indices[oi]
 
@@ -2142,6 +2608,9 @@ class BSPARStage1(nn.Module):
                     cand = {
                         "pair_repr": pair_out["pair_reprs"][b, p].detach(),
                         "pair_score": pair_score,
+                        "pair_score_base": pair_score_base,
+                        "pair_score_calibrated": pair_score,
+                        "rph_probe_prob": probe_prob,
                         "asp_span": a_span,
                         "opn_span": o_span,
                         "category_id": cat_id,

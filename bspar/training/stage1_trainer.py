@@ -113,6 +113,59 @@ class Stage1Trainer:
                         "cbr_loss_mean": train_aux_stats.get("cbr_loss_mean", 0.0),
                     }
                 )
+            if bool(getattr(self.config, "use_romr_v1_loss", False)):
+                dev_metrics.update(
+                    {
+                        "romr_active_aspects": train_aux_stats.get(
+                            "romr_active_aspects", 0.0
+                        ),
+                        "romr_active_pairs": train_aux_stats.get(
+                            "romr_active_pairs", 0.0
+                        ),
+                        "romr_mean_pos_score": train_aux_stats.get(
+                            "romr_mean_pos_score", 0.0
+                        ),
+                        "romr_mean_hardneg_score": train_aux_stats.get(
+                            "romr_mean_hardneg_score", 0.0
+                        ),
+                        "romr_violation_rate": train_aux_stats.get(
+                            "romr_violation_rate", 0.0
+                        ),
+                        "romr_loss_mean": train_aux_stats.get("romr_loss_mean", 0.0),
+                    }
+                )
+            if bool(getattr(self.config, "use_homr_v1_loss", False)):
+                dev_metrics.update(
+                    {
+                        "homr_active_aspects": train_aux_stats.get(
+                            "homr_active_aspects", 0.0
+                        ),
+                        "homr_active_pairs": train_aux_stats.get(
+                            "homr_active_pairs", 0.0
+                        ),
+                        "homr_mean_pos_score": train_aux_stats.get(
+                            "homr_mean_pos_score", 0.0
+                        ),
+                        "homr_mean_hardneg_score": train_aux_stats.get(
+                            "homr_mean_hardneg_score", 0.0
+                        ),
+                        "homr_violation_rate": train_aux_stats.get(
+                            "homr_violation_rate", 0.0
+                        ),
+                        "homr_loss_mean": train_aux_stats.get("homr_loss_mean", 0.0),
+                    }
+                )
+            if bool(getattr(self.config, "use_rph_v1_loss", False)):
+                dev_metrics.update(
+                    {
+                        "rph_active_pairs": train_aux_stats.get("rph_active_pairs", 0.0),
+                        "rph_pos_pairs": train_aux_stats.get("rph_pos_pairs", 0.0),
+                        "rph_neg_pairs": train_aux_stats.get("rph_neg_pairs", 0.0),
+                        "rph_mean_pos_prob": train_aux_stats.get("rph_mean_pos_prob", 0.0),
+                        "rph_mean_neg_prob": train_aux_stats.get("rph_mean_neg_prob", 0.0),
+                        "rph_loss_mean": train_aux_stats.get("rph_loss_mean", 0.0),
+                    }
+                )
             dev_f1 = dev_metrics.get("quad_f1", 0.0)
             ckpt_score = self._checkpoint_selection_score(dev_metrics)
 
@@ -202,6 +255,27 @@ class Stage1Trainer:
         cbr_sum_active_samples = 0.0
         cbr_sum_loss = 0.0
         cbr_count = 0
+        romr_sum_active_aspects = 0.0
+        romr_sum_active_pairs = 0.0
+        romr_sum_pos_score = 0.0
+        romr_sum_neg_score = 0.0
+        romr_sum_violation = 0.0
+        romr_sum_loss = 0.0
+        romr_count = 0
+        homr_sum_active_aspects = 0.0
+        homr_sum_active_pairs = 0.0
+        homr_sum_pos_score = 0.0
+        homr_sum_neg_score = 0.0
+        homr_sum_violation = 0.0
+        homr_sum_loss = 0.0
+        homr_count = 0
+        rph_sum_active_pairs = 0.0
+        rph_sum_pos_pairs = 0.0
+        rph_sum_neg_pairs = 0.0
+        rph_sum_pos_prob = 0.0
+        rph_sum_neg_prob = 0.0
+        rph_sum_loss = 0.0
+        rph_count = 0
 
         for batch_idx, batch in enumerate(self.train_loader):
             input_ids = batch["input_ids"].to(self.device)
@@ -309,6 +383,33 @@ class Stage1Trainer:
                         f"num_samples_with_active_boundary_loss: "
                         f"{int(losses.get('num_samples_with_active_boundary_loss', 0))}"
                     )
+                if bool(getattr(self.config, "use_romr_v1_loss", False)):
+                    msg += (
+                        f" romr_loss_mean: {losses.get('romr_loss_mean', 0.0):.3f} "
+                        f"romr_active_aspects: {int(losses.get('romr_active_aspects', 0))} "
+                        f"romr_active_pairs: {int(losses.get('romr_active_pairs', 0))} "
+                        f"romr_mean_pos_score: {losses.get('romr_mean_pos_score', 0.0):.3f} "
+                        f"romr_mean_hardneg_score: {losses.get('romr_mean_hardneg_score', 0.0):.3f} "
+                        f"romr_violation_rate: {losses.get('romr_violation_rate', 0.0):.3f}"
+                    )
+                if bool(getattr(self.config, "use_homr_v1_loss", False)):
+                    msg += (
+                        f" homr_loss_mean: {losses.get('homr_loss_mean', 0.0):.3f} "
+                        f"homr_active_aspects: {int(losses.get('homr_active_aspects', 0))} "
+                        f"homr_active_pairs: {int(losses.get('homr_active_pairs', 0))} "
+                        f"homr_mean_pos_score: {losses.get('homr_mean_pos_score', 0.0):.3f} "
+                        f"homr_mean_hardneg_score: {losses.get('homr_mean_hardneg_score', 0.0):.3f} "
+                        f"homr_violation_rate: {losses.get('homr_violation_rate', 0.0):.3f}"
+                    )
+                if bool(getattr(self.config, "use_rph_v1_loss", False)):
+                    msg += (
+                        f" rph_loss_mean: {losses.get('rph_loss_mean', 0.0):.3f} "
+                        f"rph_active_pairs: {int(losses.get('rph_active_pairs', 0))} "
+                        f"rph_pos_pairs: {int(losses.get('rph_pos_pairs', 0))} "
+                        f"rph_neg_pairs: {int(losses.get('rph_neg_pairs', 0))} "
+                        f"rph_mean_pos_prob: {losses.get('rph_mean_pos_prob', 0.0):.3f} "
+                        f"rph_mean_neg_prob: {losses.get('rph_mean_neg_prob', 0.0):.3f}"
+                    )
                 print(msg)
 
             if bool(getattr(self.config, "use_cbr_v1_loss", False)):
@@ -321,6 +422,30 @@ class Stage1Trainer:
                 )
                 cbr_sum_loss += float(losses.get("cbr_loss_mean", 0.0))
                 cbr_count += 1
+            if bool(getattr(self.config, "use_romr_v1_loss", False)):
+                romr_sum_active_aspects += float(losses.get("romr_active_aspects", 0.0))
+                romr_sum_active_pairs += float(losses.get("romr_active_pairs", 0.0))
+                romr_sum_pos_score += float(losses.get("romr_mean_pos_score", 0.0))
+                romr_sum_neg_score += float(losses.get("romr_mean_hardneg_score", 0.0))
+                romr_sum_violation += float(losses.get("romr_violation_rate", 0.0))
+                romr_sum_loss += float(losses.get("romr_loss_mean", 0.0))
+                romr_count += 1
+            if bool(getattr(self.config, "use_homr_v1_loss", False)):
+                homr_sum_active_aspects += float(losses.get("homr_active_aspects", 0.0))
+                homr_sum_active_pairs += float(losses.get("homr_active_pairs", 0.0))
+                homr_sum_pos_score += float(losses.get("homr_mean_pos_score", 0.0))
+                homr_sum_neg_score += float(losses.get("homr_mean_hardneg_score", 0.0))
+                homr_sum_violation += float(losses.get("homr_violation_rate", 0.0))
+                homr_sum_loss += float(losses.get("homr_loss_mean", 0.0))
+                homr_count += 1
+            if bool(getattr(self.config, "use_rph_v1_loss", False)):
+                rph_sum_active_pairs += float(losses.get("rph_active_pairs", 0.0))
+                rph_sum_pos_pairs += float(losses.get("rph_pos_pairs", 0.0))
+                rph_sum_neg_pairs += float(losses.get("rph_neg_pairs", 0.0))
+                rph_sum_pos_prob += float(losses.get("rph_mean_pos_prob", 0.0))
+                rph_sum_neg_prob += float(losses.get("rph_mean_neg_prob", 0.0))
+                rph_sum_loss += float(losses.get("rph_loss_mean", 0.0))
+                rph_count += 1
 
         train_aux = {}
         if bool(getattr(self.config, "use_cbr_v1_loss", False)) and cbr_count > 0:
@@ -330,6 +455,39 @@ class Stage1Trainer:
                 "num_samples_with_active_boundary_loss": cbr_sum_active_samples / cbr_count,
                 "cbr_loss_mean": cbr_sum_loss / cbr_count,
             }
+        if bool(getattr(self.config, "use_romr_v1_loss", False)) and romr_count > 0:
+            train_aux.update(
+                {
+                    "romr_active_aspects": romr_sum_active_aspects / romr_count,
+                    "romr_active_pairs": romr_sum_active_pairs / romr_count,
+                    "romr_mean_pos_score": romr_sum_pos_score / romr_count,
+                    "romr_mean_hardneg_score": romr_sum_neg_score / romr_count,
+                    "romr_violation_rate": romr_sum_violation / romr_count,
+                    "romr_loss_mean": romr_sum_loss / romr_count,
+                }
+            )
+        if bool(getattr(self.config, "use_homr_v1_loss", False)) and homr_count > 0:
+            train_aux.update(
+                {
+                    "homr_active_aspects": homr_sum_active_aspects / homr_count,
+                    "homr_active_pairs": homr_sum_active_pairs / homr_count,
+                    "homr_mean_pos_score": homr_sum_pos_score / homr_count,
+                    "homr_mean_hardneg_score": homr_sum_neg_score / homr_count,
+                    "homr_violation_rate": homr_sum_violation / homr_count,
+                    "homr_loss_mean": homr_sum_loss / homr_count,
+                }
+            )
+        if bool(getattr(self.config, "use_rph_v1_loss", False)) and rph_count > 0:
+            train_aux.update(
+                {
+                    "rph_active_pairs": rph_sum_active_pairs / rph_count,
+                    "rph_pos_pairs": rph_sum_pos_pairs / rph_count,
+                    "rph_neg_pairs": rph_sum_neg_pairs / rph_count,
+                    "rph_mean_pos_prob": rph_sum_pos_prob / rph_count,
+                    "rph_mean_neg_prob": rph_sum_neg_prob / rph_count,
+                    "rph_loss_mean": rph_sum_loss / rph_count,
+                }
+            )
 
         return total_loss / max(num_batches, 1), train_aux
 

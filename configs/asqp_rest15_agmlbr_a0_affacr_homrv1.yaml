@@ -1,0 +1,134 @@
+# BSPAR ASQP-Rest15
+# HOMR-v1 smoke config:
+# AGML-BR trunk + A0 + Aff-ACR only + head-only retained materialization auxiliary
+task_type: asqp
+dataset_name: asqp_rest15
+num_categories: 12
+num_sentiments: 3
+
+# Encoder
+model_name: xlm-roberta-base
+finetune_encoder: true
+
+# Span Proposal
+max_span_length: 8
+span_repr_size: 256
+width_embedding_dim: 32
+top_k_aspects: 20
+top_k_opinions: 20
+
+# Selective opinion recall skeleton (fixed)
+opinion_span_topk_delta: 2
+opinion_backfill_use_pair_floor_gate: false
+opinion_backfill_pair_floor: 0.0
+opinion_backfill_use_aspect_uncovered_gate: true
+opinion_backfill_aspect_min_base_pairs: 1
+opinion_backfill_use_marginal_gain_gate: false
+opinion_backfill_gain_margin: 0.0
+opinion_backfill_max_delta_per_aspect: 1
+opinion_backfill_use_aspect_displacement_gate: false
+opinion_backfill_displacement_margin: 0.0
+opinion_backfill_max_replacements_per_aspect: 1
+
+# Pair Module
+dist_buckets: 16
+top_c_categories: 3
+
+# ACR split: Aff-only
+use_acr_refine: false
+use_acr_cat_refine: false
+use_acr_aff_refine: true
+acr_hidden_dim: 128
+acr_apply_to: cat_aff
+acr_use_layernorm: true
+
+# Reranker
+cat_embedding_dim: 32
+aff_embedding_dim: 32
+num_meta_features: 9
+
+# Loss
+lambda_span: 1.0
+lambda_pair: 1.0
+lambda_pair_rank: 0.5
+pair_rank_margin: 0.2
+pair_rank_semantic_weight: 1.5
+lambda_cat: 1.0
+lambda_aff: 0.5
+lambda_rank: 1.0
+focal_alpha: 0.25
+focal_gamma: 2.0
+hard_neg_weight: 3.0
+ranking_margin: 1.0
+pair_pos_weight: 8.0
+pair_easy_neg_weight: 1.0
+pair_span_nearmiss_weight: 2.0
+pair_cat_confused_weight: 3.0
+pair_focal_gamma: 1.0
+
+# AGML-BR trunk fixed
+use_agml_loss: true
+agml_lambda: 0.3
+agml_tau: 1.0
+agml_same_aspect_only: true
+use_agml_comp_loss: false
+use_agml_br_loss: true
+agml_br_lambda: 0.1
+agml_br_margin: 0.05
+
+# Keep ROMR-v1 disabled
+use_romr_v1_loss: false
+romr_v1_lambda: 0.05
+romr_v1_margin: 0.05
+romr_v1_detach_selection: true
+
+# HOMR-v1 (head-only retained materialization auxiliary)
+use_homr_v1_loss: true
+homr_v1_lambda: 0.05
+homr_v1_margin: 0.05
+homr_v1_detach_selection: true
+
+# Stage-2 A0 fixed
+stage2_use_pair_prior: false
+stage2_pair_prior_alpha: 0.0
+stage2_pair_prior_lambda: 0.0
+stage2_pair_prior_pos_weight: 1.0
+stage2_use_group_loss: false
+stage2_group_loss_lambda: 0.0
+stage2_group_tau: 1.0
+
+# Decode / retention baseline fixed
+stage1_pair_retention_strategy: topn_only
+stage1_pair_top_n: 20
+stage1_pair_score_threshold: 0.001
+stage1_decode_pair_score_threshold: null
+
+# Training
+encoder_lr: 2.0e-5
+head_lr: 5.0e-5
+reranker_lr: 5.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.1
+stage1_epochs: 20
+stage2_epochs: 10
+batch_size: 8
+gradient_accumulation: 2
+max_grad_norm: 1.0
+patience: 8
+stage1_ckpt_metric: composite
+stage1_ckpt_quad_weight: 0.6
+stage1_ckpt_pair_recall_weight: 0.25
+stage1_ckpt_pos_ratio_weight: 0.15
+gold_injection_start: 1.0
+gold_injection_end: 0.0
+gold_injection_warmup: 2
+
+# Data
+data_dir: data/asqp_rest15
+train_file: train.txt
+dev_file: dev.txt
+test_file: test.txt
+data_format: auto
+
+seeds:
+  - 42

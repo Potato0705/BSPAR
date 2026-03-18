@@ -62,6 +62,9 @@ class PairModule(nn.Module):
         # Prediction heads
         self.pair_scorer = nn.Linear(self.pair_repr_size, 1)
         self.cat_head = nn.Linear(self.pair_repr_size, num_categories)
+        # Retained-only probe head (training/decode auxiliary, does not affect
+        # pair retention when used with detached inputs in Stage-1).
+        self.rph_probe_head = nn.Linear(self.pair_repr_size, 1)
 
         if task_type == "asqp":
             self.aff_head = nn.Linear(self.pair_repr_size, num_sentiments)
